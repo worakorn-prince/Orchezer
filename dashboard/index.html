@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Dashboard</title>
+<style>
+body { font-family: system-ui, sans-serif; margin: 16px; }
+#kpis { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+.kpi { border: 1px solid #ccc; border-radius: 8px; padding: 8px 12px; min-width: 120px; }
+.kpi b { display: block; font-size: 1.4em; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+canvas { width: 100%; max-height: 320px; }
+table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: 0.9em; }
+.notice { background: #fff3cd; border: 1px solid #e0c36a; padding: 8px 12px; border-radius: 8px; margin: 8px 0; }
+.error { background: #fdecea; border: 1px solid #e0a39a; padding: 8px 12px; border-radius: 8px; margin: 8px 0; }
+.muted { color: #666; font-size: 0.85em; }
+@media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<h1>Agent Dashboard</h1>
+<p class="muted">Static viewer — double-click to open, or run <code>python -m http.server</code> then open <code>dashboard/index.html</code> · Source: <code>dashboard/data.json</code> (built by <code>scripts/export_json.py</code>)</p>
+<div id="load-error" class="error" hidden></div>
+<div id="cdn-warning" class="notice" hidden></div>
+<div id="alerts"></div>
+<div id="kpis"></div>
+<div class="grid">
+  <div class="card"><h2>Tool calls per task (bar)</h2><canvas id="ch-calls"></canvas></div>
+  <div class="card"><h2>Cumulative timeline events (line)</h2><canvas id="ch-timeline"></canvas></div>
+  <div class="card"><h2>Done / Pending / Failed (pie)</h2><canvas id="ch-pie"></canvas></div>
+  <div class="card"><h2>Sessions / Recovery / Review per task (bar)</h2><canvas id="ch-multi"></canvas></div>
+</div>
+<h2>Per-task</h2>
+<table id="tbl">
+  <thead><tr><th>task</th><th>done</th><th>sessions</th><th>tool_calls</th><th>tokens</th><th>recovery</th><th>review_loop</th><th>time_to_DONE</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Alerts</h2>
+<div id="alerts-list"><p class="muted">No open alerts</p></div>
+<h2>Recent activity (20)</h2>
+<table id="tbl-act">
+  <thead><tr><th>time</th><th>event</th><th>task</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Recent errors <span id="err-count" class="muted"></span></h2>
+<table id="tbl-err">
+  <thead><tr><th>time</th><th>task</th><th>tool</th><th>error</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Queue health</h2>
+<table id="tbl-queue">
+  <thead><tr><th>status</th><th>count</th><th>tasks</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Time per tool (top 10)</h2>
+<table id="tbl-dur">
+  <thead><tr><th>tool</th><th>calls</th><th>avg_ms</th><th>p95_ms</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>By agent</h2>
+<table id="tbl-agent">
+  <thead><tr><th>agent</th><th>sessions</th><th>calls</th><th>errors</th><th>tokens</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Slowest tasks (top 5)</h2>
+<table id="tbl-slow">
+  <thead><tr><th>task</th><th>time_to_DONE (s)</th><th>done</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Touched files (current checkpoint)</h2>
+<p id="files" class="muted"></p>
+<h2>Review findings by severity</h2>
+<table id="tbl-find">
+  <thead><tr><th>task</th><th>time</th><th>status</th><th>severity</th><th>file</th><th>issue</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Daily trend</h2>
+<div class="card"><canvas id="ch-trend"></canvas></div>
+<h2>Tool detail (actual calls x permissions)</h2>
+<table id="tbl-tools">
+  <thead><tr><th>tool</th><th>category</th><th>calls</th><th>errors</th><th>used_by</th><th>allowed_for</th><th>denied_for</th><th>last_used</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Per-agent tool permissions</h2>
+<table id="tbl-perm">
+  <thead><tr><th>agent</th><th>model</th><th>steps</th><th>allowed</th><th>denied</th></tr></thead>
+  <tbody></tbody>
+</table>
+<p class="muted" id="gen"></p>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+async function main() {
+  let data;
+  try {
+    const res = await fetch("data.json", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    data = await res.json();
+  } catch (err) {
+    const el = document.getElementById("load-error");
+    el.hidden = false;
+    el.textContent = "Could not load data.json (" + err.message + ") — run python scripts/export_json.py from the repo root, then refresh";
+    return;
+  }
+  renderKpis(data);
+  renderTable(data);
+  renderExtra(data);
+  document.getElementById("gen").textContent = "generated_at: " + (data.generated_at || "-");
+  if (typeof Chart === "undefined") {
+    const w = document.getElementById("cdn-warning");
+    w.hidden = false;
+    w.textContent = "Offline: could not load Chart.js from CDN — showing numeric tables instead (tables below still work)";
+    return;
+  }
+  renderCharts(data);
+}
+
+function renderKpis(data) {
+  const k = data.kpis || {};
+  const items = [
+    ["tasks", k.total_tasks],
+    ["done", k.done],
+    ["success_rate", k.success_rate],
+    ["tool_calls", k.total_tool_calls],
+    ["tokens", k.tokens_total],
+    ["recoveries", k.recoveries],
+    ["review_fails", k.review_fails],
+    ["open_alerts", k.open_alerts]
+  ];
+  document.getElementById("kpis").innerHTML = items.map(([l, v]) =>
+    '<div class="kpi"><span>' + l + '</span><b>' + (v === null || v === undefined ? "-" : v) + '</b></div>'
+  ).join("");
+}
+
+function renderTable(data) {
+  const rows = data.per_task || [];
+  const tb = document.querySelector("#tbl tbody");
+  tb.innerHTML = rows.map(r =>
+    "<tr><td>" + r.task + "</td><td>" + (r.done ? "DONE" : "-") + "</td><td>" + r.sessions +
+    "</td><td>" + r.tool_calls + "</td><td>" + r.tokens + "</td><td>" + r.recovery + "</td><td>" + r.review_loop +
+    "</td><td>" + (r.time_to_DONE === null || r.time_to_DONE === undefined ? "-" : r.time_to_DONE) + "</td></tr>"
+  ).join("");
+}
+
+function renderExtra(data) {
+  const al = data.alerts || [];
+  document.getElementById("alerts-list").innerHTML = al.length ? al.map(a =>
+    '<div class="' + (a.level === "error" ? "error" : "notice") + '"><b>' + a.code + "</b> — " + a.message + "</div>"
+  ).join("") : '<p class="muted">No open alerts</p>';
+  document.getElementById("alerts").innerHTML = "";
+
+  const tb = (id, rows) => { document.querySelector("#" + id + " tbody").innerHTML = rows.join(""); };
+  tb("tbl-act", (data.recent_activity || []).map(r =>
+    "<tr><td>" + r.time + "</td><td>" + r.event + "</td><td>" + r.task + "</td></tr>"));
+  const errs = data.errors || { count: 0, recent: [] };
+  document.getElementById("err-count").textContent = "(total " + errs.count + ")";
+  tb("tbl-err", errs.recent.map(r =>
+    "<tr><td>" + r.time + "</td><td>" + r.task + "</td><td>" + r.tool + "</td><td>" + r.error + "</td></tr>"));
+  const q = data.queue || { by_status: {}, blocked: [], failed: [] };
+  const extra = { blocked: (q.blocked || []).join(", "), failed: (q.failed || []).join(", ") };
+  tb("tbl-queue", Object.keys(q.by_status || {}).map(s =>
+    "<tr><td>" + s + "</td><td>" + q.by_status[s] + "</td><td>" + (extra[s] || "") + "</td></tr>"));
+  tb("tbl-dur", ((data.durations || {}).per_tool || []).map(d =>
+    "<tr><td>" + d.tool + "</td><td>" + d.calls + "</td><td>" + d.avg_ms + "</td><td>" + d.p95_ms + "</td></tr>"));
+  tb("tbl-agent", (data.agents || []).map(a =>
+    "<tr><td>" + a.agent + "</td><td>" + a.sessions + "</td><td>" + a.calls + "</td><td>" + a.errors + "</td><td>" + a.tokens + "</td></tr>"));
+  tb("tbl-slow", (data.slowest_tasks || []).map(r =>
+    "<tr><td>" + r.task + "</td><td>" + r.time_to_DONE + "</td><td>" + (r.done ? "DONE" : "-") + "</td></tr>"));
+  document.getElementById("files").textContent = (data.files_changed || []).join(", ") || "-";
+  const fnd = data.findings || { by_severity: {}, recent: [] };
+  const sev = fnd.by_severity || {};
+  tb("tbl-find", (fnd.recent || []).map(r =>
+    "<tr><td>" + r.task + "</td><td>" + r.time + "</td><td>" + r.status + "</td><td>" + r.severity +
+    "</td><td>" + (r.file || "") + "</td><td>" + (r.issue || "") + "</td></tr>"));
+  const cap = document.querySelector("#tbl-find");
+  if (cap && !document.getElementById("find-sum")) {
+    const p = document.createElement("p");
+    p.id = "find-sum"; p.className = "muted";
+    p.textContent = "total critical=" + (sev.critical || 0) + " major=" + (sev.major || 0) + " minor=" + (sev.minor || 0);
+    cap.after(p);
+  }
+  tb("tbl-tools", ((data.tools || {}).matrix || []).map(m =>
+    "<tr><td>" + m.tool + "</td><td>" + m.category + "</td><td>" + m.calls + "</td><td>" + m.errors +
+    "</td><td>" + Object.keys(m.agents || {}).map(a => a + " x" + m.agents[a]).join(", ") +
+    "</td><td>" + (m.allowed_by || []).join(", ") + "</td><td>" + (m.denied_by || []).join(", ") +
+    "</td><td>" + (m.last_used || "-") + "</td></tr>"));
+  const tag = data.tools || { agents: {} };
+  tb("tbl-perm", Object.keys(tag.agents || {}).map(a => {
+    const g = tag.agents[a];
+    return "<tr><td>" + a + "</td><td>" + g.model + "</td><td>" + g.steps + "</td><td>" +
+      (g.allowed || []).join(", ") + "</td><td>" + (g.denied || []).join(", ") + "</td></tr>";
+  }));
+  if (typeof Chart !== "undefined") {
+    const tr = data.trend || [];
+    new Chart(document.getElementById("ch-trend"), {
+      type: "line",
+      data: { labels: tr.map(t => t.date), datasets: [
+        { label: "done", data: tr.map(t => t.done) },
+        { label: "tool_calls", data: tr.map(t => t.tool_calls) }
+      ] },
+      options: { responsive: true }
+    });
+  }
+}
+
+function renderCharts(data) {
+  const rows = data.per_task || [];
+  const labels = rows.map(r => r.task);
+  new Chart(document.getElementById("ch-calls"), {
+    type: "bar",
+    data: { labels, datasets: [{ label: "tool_calls", data: rows.map(r => r.tool_calls) }] },
+    options: { responsive: true }
+  });
+
+  const tl = (data.timeline || []).slice().sort((a, b) => String(a.time).localeCompare(String(b.time)));
+  new Chart(document.getElementById("ch-timeline"), {
+    type: "line",
+    data: { labels: tl.map((_, i) => i + 1), datasets: [{ label: "cumulative events", data: tl.map((_, i) => i + 1) }] },
+    options: { responsive: true }
+  });
+
+  const k = data.kpis || {};
+  const done = k.done || 0;
+  const failed = k.failed || 0;
+  const pending = Math.max((k.total_tasks || 0) - done - failed - (k.cancelled || 0), 0);
+  new Chart(document.getElementById("ch-pie"), {
+    type: "pie",
+    data: { labels: ["done", "pending", "failed"], datasets: [{ data: [done, pending, failed] }] },
+    options: { responsive: true }
+  });
+
+  new Chart(document.getElementById("ch-multi"), {
+    type: "bar",
+    data: { labels, datasets: [
+      { label: "sessions", data: rows.map(r => r.sessions) },
+      { label: "recovery", data: rows.map(r => r.recovery) },
+      { label: "review", data: rows.map(r => r.review_loop) }
+    ] },
+    options: { responsive: true }
+  });
+}
+
+main();
+</script>
+</body>
+</html>

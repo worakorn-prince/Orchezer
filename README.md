@@ -55,16 +55,23 @@ same 3 commands and the dashboards light up.
 
 ```text
 scripts/
-  manager.py         # Optional Python logging API (log_tool_call / save_review)
-  metrics.py         # 6 metrics + daily history/ snapshots
-  export_json.py     # metrics+events → dashboard/data.json (15 sections)
-  aggregate.py       # cross-project merge → dashboard/all-projects.json (--projects A,B,C)
-  tools_inventory.py # 24-tool catalog x agent permissions (optional) x actual usage
+  manager.py         # Optional Python logging API (log_tool_call / save_review / log_denied_attempt)
+  metrics.py         # 6 metrics + efficiency + daily history/ snapshots
+  export_json.py     # metrics+events → dashboard/data.json (19 sections)
+  aggregate.py       # cross-project merge → dashboard/all-projects.json (auto-discovers siblings)
+  tools_inventory.py # 24-tool catalog × agent permissions (optional) × actual usage
+  graph.py           # Execution Graph Task→Attempt→Session (no schema change)
+  risk.py            # Deterministic session-risk signals (observation vs recommendation)
+  observability.py   # Manager contract → .agent/manager/observability.json (schema v1)
+  failure.py         # Failure taxonomy (7 categories) + recovery analytics
+  bench.py           # Synthetic benchmarks (see docs/BENCHMARKS.md)
   bootstrap.py       # init .agent/ skeleton (+ --demo sample data)
-  test_logging.py    # 16 tests
+  test_logging.py    # 22 tests
 dashboard/
-  index.html         # single-project view (5 charts + 14 tables)
-  all.html           # cross-project view (6 charts + 12 tables)
+  index.html         # single-project view (5 charts + 17 tables)
+  all.html           # cross-project view (6 charts + 20 tables)
+docs/
+  BENCHMARKS.md      # measured numbers (10K/100K/500K) + how to run 1M/10M
 ```
 
 ## Tool permission tables (optional)

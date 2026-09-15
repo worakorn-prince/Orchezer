@@ -22,9 +22,40 @@ try:
     from tools_inventory import build_tools_section
 except ImportError:
     build_tools_section = None
+try:
+    from graph import build_graph
+except ImportError:
+    build_graph = None
+try:
+    from risk import assess as assess_risk
+except ImportError:
+    assess_risk = None
+try:
+    from failure import analyze as analyze_failures
+except ImportError:
+    analyze_failures = None
+try:
+    from observability import build_contract
+except ImportError:
+    build_contract = None
 
 SESSION_EVENTS = ("WORKER_STARTED", "WORKER_RESUMED")
 DONE_EVENT = "TASK_DONE"
+
+
+def dump_json(payload, path):
+    tool_calls = 0
+    try:
+        tool_calls = int(((payload.get("kpis", {}) or {}).get("total_tool_calls", 0)
+                          or (payload.get("combined", {}) or {}).get("total_tool_calls", 0)) or 0)
+    except Exception:
+        pass
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        if tool_calls > 50000:
+            json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+        else:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
 FAILED_EVENTS = ("TASK_FAILED",)
 CANCELLED_EVENTS = ("TASK_CANCELLED", "TASK_CANCELED")
 STUCK_HOURS = 6
@@ -237,7 +268,8 @@ def build_extra(events, toolcalls, queue, reviews, history, files_changed, confi
 
 
 def build_payload(metrics, events, toolcalls=None, queue=None, reviews=None,
-                  history=None, files_changed=None, config=None, tools_section=None):
+                  history=None, files_changed=None, config=None, tools_section=None,
+                  checkpoint=None):
     totals = (metrics or {}).get("totals", {}) if isinstance(metrics, dict) else {}
     per_task_raw = (metrics or {}).get("per_task", {}) if isinstance(metrics, dict) else {}
     if not isinstance(per_task_raw, dict):
@@ -255,6 +287,9 @@ def build_payload(metrics, events, toolcalls=None, queue=None, reviews=None,
             "review_loop": int(v.get("review_loop", 0) or 0),
             "time_to_DONE": v.get("time_to_DONE"),
             "tokens": int(v.get("tokens_total", 0) or 0),
+            "recovery_tokens": int(v.get("recovery_tokens", 0) or 0),
+            "review_passed": int(v.get("review_passed", 0) or 0),
+            "denied": int(v.get("denied_attempts", 0) or 0),
         })
 
     timeline = []
@@ -280,6 +315,43 @@ def build_payload(metrics, events, toolcalls=None, queue=None, reviews=None,
 
     extra = build_extra(events, toolcalls or [], queue or {}, reviews or [],
                         history or [], files_changed or [], config or {}, per_task)
+
+    efficiency = (metrics or {}).get("efficiency", {}) if isinstance(metrics, dict) else {}
+    agent_efficiency = ((metrics or {}).get("agent_efficiency", [])
+                        if isinstance(metrics, dict) else [])
+
+    execution = {"tasks": [], "summary": {"tasks": 0, "completed": 0,
+                 "failed": 0, "running": 0, "total_sessions": 0, "total_attempts": 0}}
+    if build_graph is not None:
+        try:
+            execution = build_graph(events, toolcalls or [])
+        except Exception:
+            pass
+
+    risk = {"overall": "ok", "sessions": [], "thresholds": {},
+            "history_sessions": 0, "median_calls": None}
+    if assess_risk is not None:
+        try:
+            risk = assess_risk(toolcalls or [], events, checkpoint, config or {})
+        except Exception:
+            pass
+
+    failure = {"tasks": {}, "summary": {"tasks_with_failures": 0,
+               "total_failures": 0, "total_recovery_attempts": 0,
+               "recovery_success_rate": None, "total_recovery_tokens": 0}}
+    if analyze_failures is not None:
+        try:
+            failure = analyze_failures(events, toolcalls or [])
+        except Exception:
+            pass
+    contract = {"schema_version": 1, "generated_at": None, "task_id": None,
+                "status": "unknown", "session": None, "recommendations": []}
+    if build_contract is not None:
+        try:
+            contract = build_contract(events=events, toolcalls=toolcalls or [],
+                                      checkpoint=checkpoint, config=config or {})
+        except Exception:
+            pass
 
     if tools_section is None:
         if build_tools_section is not None:
@@ -316,6 +388,12 @@ def build_payload(metrics, events, toolcalls=None, queue=None, reviews=None,
         "findings": extra["findings"],
         "alerts": extra["alerts"],
         "trend": extra["trend"],
+        "execution": execution,
+        "efficiency": efficiency,
+        "agent_efficiency": agent_efficiency,
+        "risk": risk,
+        "failure": failure,
+        "contract": contract,
         "tools": tools_section,
     }
     return payload
@@ -339,10 +417,9 @@ def export_data(out_path, metrics_path=METRICS_FILE, events_path=EVENTS_FILE,
     checkpoint = load_json(checkpoint_path, default={}) or {}
     config = load_json(config_path, default={}) or {}
     payload = build_payload(metrics, events, toolcalls, queue, reviews,
-                            history, checkpoint.get("files_changed", []), config)
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
+                            history, checkpoint.get("files_changed", []), config,
+                            checkpoint=checkpoint)
+    dump_json(payload, out_path)
     k = payload["kpis"]
     print(f"Exported: {k['total_tasks']} tasks, {k['done']} done, "
           f"success_rate {k['success_rate']:.2f}, "

@@ -78,6 +78,15 @@ def log_dispatch(task_id, agent, session_id, attempt=1, prompt_text=""):
     log_event("WORKER_STARTED", task_id, f"Dispatch {agent} session {session_id}", {"session_id": session_id, "agent": agent, "attempt": attempt})
     return entry
 
+def log_denied_attempt(task_id, session_id, agent, tool, reason="", attempt=1):
+    entry = log_tool_call(task_id, session_id, agent, "ATTEMPT", tool, duration_ms=0,
+                          status="denied", error=reason or None, prompt_text="",
+                          attempt=attempt)
+    log_event("TOOL_DENIED", task_id, f"{agent} attempted denied tool {tool}: {reason}",
+              {"session_id": session_id, "agent": agent, "tool": tool,
+               "reason": reason, "attempt": attempt})
+    return entry
+
 def wrap_task(task_id, agent, session_id, tool, prompt_text, fn, attempt=1, operation="RESULT", tokens_in=None, tokens_out=None):
     start = time.perf_counter()
     status = "ok"

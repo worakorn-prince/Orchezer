@@ -28,6 +28,8 @@ th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: 
 <div id="cdn-warning" class="notice" hidden></div>
 <div id="alerts"></div>
 <div id="kpis"></div>
+<h2>Overview</h2>
+<div id="overview" style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;"></div>
 <div class="grid">
   <div class="card"><h2>Tool calls per project (bar)</h2><canvas id="ch-proj-calls"></canvas></div>
   <div class="card"><h2>Done / Pending per project (bar)</h2><canvas id="ch-proj-done"></canvas></div>
@@ -83,6 +85,12 @@ th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: 
   <thead><tr><th>project</th><th>task</th><th>time</th><th>status</th><th>severity</th><th>file</th><th>issue</th></tr></thead>
   <tbody></tbody>
 </table>
+<h2>Permission audit (mismatches only, all projects)</h2>
+<div id="audit-box"><p class="muted">No audit signals</p></div>
+<table id="tbl-audit">
+  <thead><tr><th>tool</th><th>state</th><th>calls</th><th>denied</th><th>allowed_for</th></tr></thead>
+  <tbody></tbody>
+</table>
 <h2>Combined tool detail (actual calls x permissions)</h2>
 <table id="tbl-tools">
   <thead><tr><th>tool</th><th>หมวด</th><th>calls</th><th>errors</th><th>ใช้โดย</th><th>อนุญาตให้</th><th>ห้าม</th><th>ใช้ล่าสุด</th></tr></thead>
@@ -91,6 +99,46 @@ th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: 
 <h2>Per-agent tool permissions</h2>
 <table id="tbl-perm">
   <thead><tr><th>agent</th><th>model</th><th>steps</th><th>อนุญาต</th><th>ห้าม</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Task execution (graph)</h2>
+<table id="tbl-exec">
+  <thead><tr><th>project</th><th>task</th><th>attempts</th><th>sessions</th><th>agents</th><th>review</th><th>terminal</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Efficiency (combined)</h2>
+<table id="tbl-eff">
+  <thead><tr><th>metric</th><th>value</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Efficiency by project</h2>
+<table id="tbl-eff-proj">
+  <thead><tr><th>project</th><th>metric</th><th>value</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Agent comparison by project (LOW = sample &lt; 3 tasks)</h2>
+<table id="tbl-agent-eff">
+  <thead><tr><th>project</th><th>agent</th><th>tasks</th><th>success</th><th>avg_tokens</th><th>avg_tools</th><th>avg_time_s</th><th>recovery</th><th>sample</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Session risk (all projects)</h2>
+<table id="tbl-risk">
+  <thead><tr><th>project</th><th>session</th><th>agent</th><th>task</th><th>level</th><th>calls</th><th>errors</th><th>recommendation</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Manager contracts (per project)</h2>
+<table id="tbl-contract">
+  <thead><tr><th>project</th><th>task</th><th>status</th><th>session</th><th>risk</th><th>recommendations</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Failures &amp; recovery (all projects)</h2>
+<table id="tbl-fail">
+  <thead><tr><th>project</th><th>task</th><th>failures</th><th>categories</th><th>recovery</th><th>recovered</th><th>repeated</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Session view (all projects)</h2>
+<table id="tbl-session">
+  <thead><tr><th>project</th><th>session</th><th>agent</th><th>task</th><th>started</th><th>calls</th><th>errors</th></tr></thead>
   <tbody></tbody>
 </table>
 <p class="muted" id="gen"></p>
@@ -137,6 +185,16 @@ function renderKpis(data) {
   document.getElementById("kpis").innerHTML = items.map(([l, v]) =>
     '<div class="kpi"><span>' + l + '</span><b>' + (v === null || v === undefined ? "-" : v) + '</b></div>'
   ).join("");
+  const c_ov_tasks = data.per_task || [];
+  const c_ov_blocked = (data.per_project || []).reduce((n, p) => n + (((p.queue || {}).blocked) || 0), 0);
+  const c_ov = [["active_tasks", c_ov_tasks.filter(r => !r.done).length],
+    ["completed", c.done], ["failed", c.failed], ["blocked", c_ov_blocked],
+    ["active_sessions", (data.execution || []).reduce((n, t) => n + (t.n_sessions || 0), 0)],
+    ["high_risk", (data.risk || []).filter(s => s.level === "high").length],
+    ["recoveries", c.recoveries]];
+  const c_ov_el = document.getElementById("overview");
+  if (c_ov_el) c_ov_el.innerHTML = c_ov.map(([l, v]) =>
+    '<div class="kpi"><span>' + l + '</span><b>' + v + '</b></div>').join("");
 }
 
 function renderTables(data) {
@@ -163,6 +221,10 @@ function renderExtra(data) {
   ).join("") : '<p class="muted">No open alerts</p>';
   document.getElementById("alerts").innerHTML = "";
   const tb = (id, rows) => { document.querySelector("#" + id + " tbody").innerHTML = rows.join(""); };
+  tb("tbl-risk", (data.risk || []).map(s =>
+    "<tr><td>" + s.project + "</td><td>" + s.session_id + "</td><td>" + s.agent + "</td><td>" + (s.task || "-") +
+    "</td><td>" + s.level + "</td><td>" + s.signals.calls + "</td><td>" + s.signals.errors +
+    "</td><td>" + (s.recommendation || []).join(" | ") + "</td></tr>"));
   tb("tbl-act", (data.recent_activity || []).map(r =>
     "<tr><td>" + r.project + "</td><td>" + r.time + "</td><td>" + r.event + "</td><td>" + r.task + "</td></tr>"));
   tb("tbl-err", ((data.errors || {}).recent || []).map(r =>
@@ -178,6 +240,48 @@ function renderExtra(data) {
   tb("tbl-find", ((data.findings || {}).recent || []).map(r =>
     "<tr><td>" + r.project + "</td><td>" + r.task + "</td><td>" + r.time + "</td><td>" + r.status + "</td><td>" + r.severity +
     "</td><td>" + (r.file || "") + "</td><td>" + (r.issue || "") + "</td></tr>"));
+  tb("tbl-exec", (data.execution || []).map(t =>
+    "<tr><td>" + t.project + "</td><td>" + t.task + "</td><td>" + t.n_attempts + "</td><td>" + t.n_sessions +
+    "</td><td>" + (t.agents || []).join(", ") + "</td><td>" + t.review_loop + "</td><td>" + t.terminal.state + "</td></tr>"));
+  const sessRows = [];
+  (data.execution || []).forEach(t => (t.sessions || []).forEach(s =>
+    sessRows.push("<tr><td>" + t.project + "</td><td>" + s.session_id + "</td><td>" + s.agent + "</td><td>" + t.task +
+    "</td><td>" + (s.started || "-") + "</td><td>" + s.tool_calls + "</td><td>" + s.errors + "</td></tr>")));
+  tb("tbl-session", sessRows);
+  tb("tbl-contract", (data.contracts || []).map(c =>
+    "<tr><td>" + c.project + "</td><td>" + c.task_id + "</td><td>" + c.status + "</td><td>" +
+    ((c.session || {}).id || "-") + "</td><td>" + ((c.session || {}).risk || "-") + "</td><td>" +
+    (c.recommendations || []).map(r => r.type + "[" + r.priority + "]").join(", ") + "</td></tr>"));
+  tb("tbl-fail", (data.failure || []).map(f =>
+    "<tr><td>" + f.project + "</td><td>" + f.task + "</td><td>" + f.failures + "</td><td>" +
+    Object.keys(f.by_category || {}).map(k => k + "x" + f.by_category[k]).join(", ") +
+    "</td><td>" + f.recovery_attempts + "</td><td>" + (f.recovered ? "yes" : "-") +
+    "</td><td>" + (f.repeated || []).map(r => r.category).join(", ") + "</td></tr>"));
+  const fmtv = (v) => (v === null || v === undefined ? "n/a" : Math.round(v * 100) / 100);
+  tb("tbl-eff", Object.keys(data.efficiency || {}).map(k =>
+    "<tr><td>" + k + "</td><td>" + fmtv(data.efficiency[k]) + "</td></tr>"));
+  const rows_eff = [];
+  const rows_age = [];
+  (data.efficiency_by_project || []).forEach(p => {
+    Object.keys(p.efficiency || {}).forEach(k =>
+      rows_eff.push("<tr><td>" + p.project + "</td><td>" + k + "</td><td>" + fmtv(p.efficiency[k]) + "</td></tr>"));
+    (p.agent_efficiency || []).forEach(a =>
+      rows_age.push("<tr><td>" + p.project + "</td><td>" + a.agent + "</td><td>" + a.tasks + "</td><td>" + fmtv(a.success_rate) +
+      "</td><td>" + (a.avg_tokens === null || a.avg_tokens === undefined ? "-" : Math.round(a.avg_tokens)) +
+      "</td><td>" + fmtv(a.avg_tools) + "</td><td>" + fmtv(a.avg_time_s) + "</td><td>" + fmtv(a.recovery_rate) +
+      "</td><td>" + (a.low_sample ? "LOW" : "ok") + "</td></tr>"));
+  });
+  tb("tbl-eff-proj", rows_eff);
+  tb("tbl-agent-eff", rows_age);
+  const audit_rows = ((data.tools || {}).matrix || []).filter(m =>
+    ["denied_attempted", "allowed_unused", "unlisted_used"].includes(m.audit_state));
+  document.getElementById("audit-box").innerHTML = audit_rows.length ?
+    audit_rows.filter(m => m.audit_state === "denied_attempted").map(m =>
+      '<div class="error"><b>SECURITY ' + m.tool + "</b> — denied tool was attempted " +
+      m.denied_attempts + " time(s)</div>").join("") : '<p class="muted">No audit signals</p>';
+  tb("tbl-audit", audit_rows.map(m =>
+    "<tr><td>" + m.tool + "</td><td>" + m.audit_state + "</td><td>" + m.calls + "</td><td>" + m.denied_attempts +
+    "</td><td>" + (m.allowed_by || []).join(", ") + "</td></tr>"));
   if (typeof Chart !== "undefined") {
     const tr = data.trend || [];
     const names = [...new Set(tr.flatMap(t => Object.keys(t.projects || {})))];

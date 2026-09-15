@@ -98,8 +98,11 @@ def build_tools_section(toolcalls, agents_perms=None, agents_dir=None):
     usage = {}
     for r in toolcalls:
         key = normalize_tool(r.get("tool"))
-        u = usage.setdefault(key, {"calls": 0, "errors": 0, "agents": {},
+        u = usage.setdefault(key, {"calls": 0, "denied": 0, "errors": 0, "agents": {},
                                    "last_used": None, "raw_names": set()})
+        if r.get("status") == "denied":
+            u["denied"] += 1
+            continue
         u["calls"] += 1
         if r.get("status") == "error":
             u["errors"] += 1
@@ -120,11 +123,23 @@ def build_tools_section(toolcalls, agents_perms=None, agents_dir=None):
                 allowed_by.append(agent)
             elif perm == "deny":
                 denied_by.append(agent)
-        u = usage.get(key, {"calls": 0, "errors": 0, "agents": {}, "last_used": None})
+        u = usage.get(key, {"calls": 0, "denied": 0, "errors": 0,
+                              "agents": {}, "last_used": None})
+        if denied_by and u["denied"] > 0:
+            state = "denied_attempted"
+        elif allowed_by and u["calls"] > 0:
+            state = "allowed_used"
+        elif allowed_by:
+            state = "allowed_unused"
+        elif u["calls"] > 0 or u["denied"] > 0:
+            state = "unlisted_used"
+        else:
+            state = "no_data"
         matrix.append({
             "tool": key, "category": cat, "desc": desc,
             "allowed_by": allowed_by, "denied_by": denied_by,
-            "calls": u["calls"], "errors": u["errors"],
+            "calls": u["calls"], "denied_attempts": u["denied"],
+            "errors": u["errors"], "audit_state": state,
             "agents": u["agents"], "last_used": u["last_used"],
         })
     agents = {}

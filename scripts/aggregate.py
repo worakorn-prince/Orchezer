@@ -35,9 +35,37 @@ def default_projects(base=None):
     return found or [ROOT]
 
 from export_json import (  # noqa: E402
-    read_jsonl, load_json, read_reviews, read_history, build_extra,
+    read_jsonl, load_json, read_reviews, read_history, build_extra, dump_json,
 )
 from tools_inventory import build_tools_section  # noqa: E402
+from graph import build_graph  # noqa: E402
+from risk import assess as assess_risk  # noqa: E402
+from failure import analyze as analyze_failures  # noqa: E402
+from observability import build_contract  # noqa: E402
+
+
+def _safe_risk(toolcalls, events, checkpoint, config):
+    try:
+        return assess_risk(toolcalls, events, checkpoint, config)
+    except Exception:
+        return {"overall": "ok", "sessions": [], "thresholds": {},
+                "history_sessions": 0, "median_calls": None}
+
+
+def _safe_failure(events, toolcalls):
+    try:
+        return analyze_failures(events, toolcalls)
+    except Exception:
+        return {"tasks": {}, "summary": {}}
+
+
+def _safe_contract(events, toolcalls, checkpoint, config):
+    try:
+        return build_contract(events=events, toolcalls=toolcalls,
+                              checkpoint=checkpoint, config=config)
+    except Exception:
+        return {"task_id": None, "status": "unknown", "session": None,
+                "recommendations": []}
 
 
 def collect_project(root):
@@ -65,12 +93,20 @@ def collect_project(root):
         "review_loop": int((v or {}).get("review_loop", 0) or 0),
         "time_to_DONE": (v or {}).get("time_to_DONE"),
         "tokens": int((v or {}).get("tokens_total", 0) or 0),
+        "recovery_tokens": int((v or {}).get("recovery_tokens", 0) or 0),
+        "review_passed": int((v or {}).get("review_passed", 0) or 0),
     } for t, v in sorted(per_task_raw.items())]
     extra = build_extra(events, toolcalls, queue, reviews, history,
                         checkpoint.get("files_changed", []), config, per_task)
     return {"name": name, "root": root, "ok": True, "totals": totals,
             "per_task": per_task, "extra": extra, "events": events,
-            "history": history, "tools": build_tools_section(toolcalls)}
+            "history": history, "tools": build_tools_section(toolcalls),
+            "execution": build_graph(events, toolcalls),
+            "efficiency": metrics.get("efficiency", {}) or {},
+            "agent_efficiency": metrics.get("agent_efficiency", []) or [],
+            "risk": _safe_risk(toolcalls, events, checkpoint, config),
+            "failure": _safe_failure(events, toolcalls),
+            "contract": _safe_contract(events, toolcalls, checkpoint, config)}
 
 
 def build_payload(projects):
@@ -119,6 +155,36 @@ def build_payload(projects):
             per_task.append({"project": c["name"], **row})
     per_task.sort(key=lambda r: (r["project"], r["task"]))
 
+    execution = []
+    for c in ok:
+        for t in ((c.get("execution", {}) or {}).get("tasks", []) or []):
+            execution.append({"project": c["name"], **t})
+    execution.sort(key=lambda r: (r["project"], r["task"]))
+
+    def _div(a, b):
+        return (a / b) if b else None
+
+    done_n = sum(1 for r in per_task if r.get("done"))
+    tok = sum(int(r.get("tokens", 0) or 0) for r in per_task)
+    calls_n = sum(int(r.get("tool_calls", 0) or 0) for r in per_task)
+    rec_tok = sum(int(r.get("recovery_tokens", 0) or 0) for r in per_task)
+    sess_n = sum(int(r.get("sessions", 0) or 0) for r in per_task)
+    loops = sum(int(r.get("review_loop", 0) or 0) for r in per_task)
+    passed = sum(int(r.get("review_passed", 0) or 0) for r in per_task)
+    efficiency = {
+        "task_efficiency": _div(done_n, len(per_task)),
+        "token_per_success": _div(tok, done_n),
+        "tools_per_success": _div(calls_n, done_n),
+        "recovery_cost_ratio": _div(rec_tok, tok),
+        "session_efficiency": _div(done_n, sess_n),
+        "review_rework_rate": _div(loops, loops + passed),
+    }
+    efficiency_by_project = [{
+        "project": c["name"],
+        "efficiency": c.get("efficiency", {}) or {},
+        "agent_efficiency": c.get("agent_efficiency", []) or [],
+    } for c in collected]
+
     timeline = []
     for c in ok:
         for e in c.get("events", []) or []:
@@ -129,6 +195,9 @@ def build_payload(projects):
     timeline = timeline[-TIMELINE_CAP:]
 
     recent_activity, errors, alerts, findings_recent = [], {"count": 0, "recent": []}, [], []
+    risk_sessions = []
+    failure_tasks = []
+    contracts = []
     sev_total = {"critical": 0, "major": 0, "minor": 0}
     files, agents, durations = {}, {}, {}
     slowest, trend_by_date = [], {}
@@ -141,6 +210,13 @@ def build_payload(projects):
         errors["count"] += int((ex.get("errors", {}) or {}).get("count", 0) or 0)
         for a in ex.get("alerts", []) or []:
             alerts.append({"project": c["name"], **a})
+        for s in ((c.get("risk", {}) or {}).get("sessions", []) or []):
+            risk_sessions.append({"project": c["name"], **s})
+        for tid, t in ((c.get("failure", {}) or {}).get("tasks", {}) or {}).items():
+            if (t or {}).get("failures"):
+                failure_tasks.append({"project": c["name"], "task": tid, **t})
+        if c.get("contract", {}).get("task_id"):
+            contracts.append({"project": c["name"], **c["contract"]})
         for f in (ex.get("findings", {}) or {}).get("recent", []) or []:
             findings_recent.append({"project": c["name"], **f})
         for k, v in ((ex.get("findings", {}) or {}).get("by_severity", {}) or {}).items():
@@ -219,6 +295,12 @@ def build_payload(projects):
         "alerts": alerts,
         "trend": trend,
         "tools": tools,
+        "execution": execution,
+        "efficiency": efficiency,
+        "efficiency_by_project": efficiency_by_project,
+        "risk": risk_sessions,
+        "failure": failure_tasks,
+        "contracts": contracts,
     }
 
 
@@ -231,9 +313,7 @@ def main(argv=None):
     projects = ([p.strip() for p in args.projects.split(",") if p.strip()]
                 if args.projects else default_projects())
     payload = build_payload(projects)
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
+    dump_json(payload, args.out)
     c = payload["combined"]
     print(f"Aggregated: {c['projects']} projects, {c['total_tasks']} tasks, "
           f"{c['done']} done, success_rate {c['success_rate']:.2f}, "

@@ -27,12 +27,19 @@ th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: 
 <div id="cdn-warning" class="notice" hidden></div>
 <div id="alerts"></div>
 <div id="kpis"></div>
+<h2>Overview</h2>
+<div id="overview" style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;"></div>
 <div class="grid">
   <div class="card"><h2>Tool calls per task (bar)</h2><canvas id="ch-calls"></canvas></div>
   <div class="card"><h2>Cumulative timeline events (line)</h2><canvas id="ch-timeline"></canvas></div>
   <div class="card"><h2>Done / Pending / Failed (pie)</h2><canvas id="ch-pie"></canvas></div>
   <div class="card"><h2>Sessions / Recovery / Review per task (bar)</h2><canvas id="ch-multi"></canvas></div>
 </div>
+<h2>Session view</h2>
+<table id="tbl-session">
+  <thead><tr><th>session</th><th>agent</th><th>task</th><th>started</th><th>calls</th><th>errors</th><th>tokens</th></tr></thead>
+  <tbody></tbody>
+</table>
 <h2>Per-task</h2>
 <table id="tbl">
   <thead><tr><th>task</th><th>done</th><th>sessions</th><th>tool_calls</th><th>tokens</th><th>recovery</th><th>review_loop</th><th>time_to_DONE</th></tr></thead>
@@ -40,6 +47,23 @@ th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: 
 </table>
 <h2>Alerts</h2>
 <div id="alerts-list"><p class="muted">No open alerts</p></div>
+<h2>Manager contract (observability.json)</h2>
+<div id="contract-box"><p class="muted">No contract available</p></div>
+<h2>Failures &amp; recovery</h2>
+<table id="tbl-fail">
+  <thead><tr><th>task</th><th>failures</th><th>categories</th><th>recovery</th><th>recovered</th><th>rec_tokens</th><th>repeated</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Session risk (observation for Manager)</h2>
+<table id="tbl-risk">
+  <thead><tr><th>session</th><th>agent</th><th>task</th><th>level</th><th>calls</th><th>errors</th><th>err_rate</th><th>tokens</th><th>recommendation</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Task execution (graph)</h2>
+<table id="tbl-exec">
+  <thead><tr><th>task</th><th>attempts</th><th>sessions</th><th>agents</th><th>review</th><th>recovery</th><th>terminal</th></tr></thead>
+  <tbody></tbody>
+</table>
 <h2>Recent activity (20)</h2>
 <table id="tbl-act">
   <thead><tr><th>time</th><th>event</th><th>task</th></tr></thead>
@@ -77,8 +101,24 @@ th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: 
   <thead><tr><th>task</th><th>time</th><th>status</th><th>severity</th><th>file</th><th>issue</th></tr></thead>
   <tbody></tbody>
 </table>
+<h2>Efficiency</h2>
+<table id="tbl-eff">
+  <thead><tr><th>metric</th><th>value</th></tr></thead>
+  <tbody></tbody>
+</table>
+<h2>Agent comparison (LOW = sample &lt; 3 tasks)</h2>
+<table id="tbl-agent-eff">
+  <thead><tr><th>agent</th><th>tasks</th><th>success</th><th>avg_tokens</th><th>avg_tools</th><th>avg_time_s</th><th>recovery</th><th>sample</th></tr></thead>
+  <tbody></tbody>
+</table>
 <h2>Daily trend</h2>
 <div class="card"><canvas id="ch-trend"></canvas></div>
+<h2>Permission audit (mismatches only)</h2>
+<div id="audit-box"><p class="muted">No audit signals</p></div>
+<table id="tbl-audit">
+  <thead><tr><th>tool</th><th>state</th><th>calls</th><th>denied</th><th>allowed_for</th></tr></thead>
+  <tbody></tbody>
+</table>
 <h2>Tool detail (actual calls x permissions)</h2>
 <table id="tbl-tools">
   <thead><tr><th>tool</th><th>category</th><th>calls</th><th>errors</th><th>used_by</th><th>allowed_for</th><th>denied_for</th><th>last_used</th></tr></thead>
@@ -132,6 +172,16 @@ function renderKpis(data) {
   document.getElementById("kpis").innerHTML = items.map(([l, v]) =>
     '<div class="kpi"><span>' + l + '</span><b>' + (v === null || v === undefined ? "-" : v) + '</b></div>'
   ).join("");
+  const ov_tasks = data.per_task || [];
+  const ov_q = (data.queue || {}).by_status || {};
+  const ov = [["active_tasks", ov_tasks.filter(r => !r.done).length],
+    ["completed", k.done], ["failed", k.failed], ["blocked", ov_q.blocked || 0],
+    ["active_sessions", ((data.execution || {}).tasks || []).reduce((n, t) => n + (t.n_sessions || 0), 0)],
+    ["high_risk", ((data.risk || {}).sessions || []).filter(s => s.level === "high").length],
+    ["recoveries", k.recoveries]];
+  const ov_el = document.getElementById("overview");
+  if (ov_el) ov_el.innerHTML = ov.map(([l, v]) =>
+    '<div class="kpi"><span>' + l + '</span><b>' + v + '</b></div>').join("");
 }
 
 function renderTable(data) {
@@ -152,6 +202,34 @@ function renderExtra(data) {
   document.getElementById("alerts").innerHTML = "";
 
   const tb = (id, rows) => { document.querySelector("#" + id + " tbody").innerHTML = rows.join(""); };
+  const sessRows = [];
+  ((data.execution || {}).tasks || []).forEach(t => (t.sessions || []).forEach(s =>
+    sessRows.push("<tr><td>" + s.session_id + "</td><td>" + s.agent + "</td><td>" + t.task +
+    "</td><td>" + (s.started || "-") + "</td><td>" + s.tool_calls + "</td><td>" + s.errors +
+    "</td><td>" + s.tokens + "</td></tr>")));
+  tb("tbl-session", sessRows);
+  const ct = data.contract || {};
+  document.getElementById("contract-box").innerHTML = ct.task_id ?
+    "<p><b>" + ct.task_id + "</b> — " + ct.status + " (schema v" + ct.schema_version + ")" +
+    (ct.session ? " · session " + ct.session.id + " risk=" + ct.session.risk : "") + "</p>" +
+    (ct.recommendations || []).map(r => '<div class="notice"><b>' + r.type + " [" + r.priority + "]</b> — " + r.reason + "</div>").join("") :
+    '<p class="muted">No contract available</p>';
+  const fl = (data.failure || {}).tasks || {};
+  tb("tbl-fail", Object.keys(fl).filter(t => fl[t].failures).map(t => {
+    const f = fl[t];
+    return "<tr><td>" + t + "</td><td>" + f.failures + "</td><td>" +
+      Object.keys(f.by_category || {}).map(k => k + "x" + f.by_category[k]).join(", ") +
+      "</td><td>" + f.recovery_attempts + "</td><td>" + (f.recovered ? "yes" : "-") +
+      "</td><td>" + f.recovery_tokens + "</td><td>" + (f.repeated || []).map(r => r.category).join(", ") + "</td></tr>";
+  }));
+  tb("tbl-risk", ((data.risk || {}).sessions || []).map(s =>
+    "<tr><td>" + s.session_id + "</td><td>" + s.agent + "</td><td>" + (s.task || "-") + "</td><td>" + s.level +
+    "</td><td>" + s.signals.calls + "</td><td>" + s.signals.errors + "</td><td>" + s.signals.error_rate +
+    "</td><td>" + s.signals.tokens + "</td><td>" + (s.recommendation || []).join(" | ") + "</td></tr>"));
+  tb("tbl-exec", ((data.execution || {}).tasks || []).map(t =>
+    "<tr><td>" + t.task + "</td><td>" + t.n_attempts + "</td><td>" + t.n_sessions +
+    "</td><td>" + (t.agents || []).join(", ") + "</td><td>" + t.review_loop +
+    "</td><td>" + (t.recovery_chain || []).length + "</td><td>" + t.terminal.state + "</td></tr>"));
   tb("tbl-act", (data.recent_activity || []).map(r =>
     "<tr><td>" + r.time + "</td><td>" + r.event + "</td><td>" + r.task + "</td></tr>"));
   const errs = data.errors || { count: 0, recent: [] };
@@ -187,11 +265,29 @@ function renderExtra(data) {
     "</td><td>" + (m.allowed_by || []).join(", ") + "</td><td>" + (m.denied_by || []).join(", ") +
     "</td><td>" + (m.last_used || "-") + "</td></tr>"));
   const tag = data.tools || { agents: {} };
+  const audit_states = ["denied_attempted", "allowed_unused", "unlisted_used"];
+  const audit_rows = ((data.tools || {}).matrix || []).filter(m => audit_states.includes(m.audit_state));
+  document.getElementById("audit-box").innerHTML = audit_rows.length ?
+    audit_rows.filter(m => m.audit_state === "denied_attempted").map(m =>
+      '<div class="error"><b>SECURITY ' + m.tool + "</b> — denied tool was attempted " +
+      m.denied_attempts + " time(s)</div>").join("") : '<p class="muted">No audit signals</p>';
+  tb("tbl-audit", audit_rows.map(m =>
+    "<tr><td>" + m.tool + "</td><td>" + m.audit_state + "</td><td>" + m.calls + "</td><td>" + m.denied_attempts +
+    "</td><td>" + (m.allowed_by || []).join(", ") + "</td></tr>"));
   tb("tbl-perm", Object.keys(tag.agents || {}).map(a => {
     const g = tag.agents[a];
     return "<tr><td>" + a + "</td><td>" + g.model + "</td><td>" + g.steps + "</td><td>" +
       (g.allowed || []).join(", ") + "</td><td>" + (g.denied || []).join(", ") + "</td></tr>";
   }));
+  const eff = data.efficiency || {};
+  const fmtv = (v) => (v === null || v === undefined ? "n/a" : Math.round(v * 100) / 100);
+  tb("tbl-eff", Object.keys(eff).map(k =>
+    "<tr><td>" + k + "</td><td>" + fmtv(eff[k]) + "</td></tr>"));
+  tb("tbl-agent-eff", (data.agent_efficiency || []).map(a =>
+    "<tr><td>" + a.agent + "</td><td>" + a.tasks + "</td><td>" + fmtv(a.success_rate) +
+    "</td><td>" + (a.avg_tokens === null || a.avg_tokens === undefined ? "-" : Math.round(a.avg_tokens)) +
+    "</td><td>" + fmtv(a.avg_tools) + "</td><td>" + fmtv(a.avg_time_s) +
+    "</td><td>" + fmtv(a.recovery_rate) + "</td><td>" + (a.low_sample ? "LOW" : "ok") + "</td></tr>"));
   if (typeof Chart !== "undefined") {
     const tr = data.trend || [];
     new Chart(document.getElementById("ch-trend"), {

@@ -1435,3 +1435,17 @@ python -m unittest discover -s scripts -p test_upgrade.py -v   # U1-U7 เดิ
     (โมเดลเป็น engine) สิ่งที่ต่างกันคือสิทธิ์รายเอเจนต์ ดูได้ที่ตาราง
     tbl-tools/tbl-perm ทั้งสองจอ
 
+### v0.2.0 roadmap completion (Agent Observatory)
+
+Roadmap P0+P1+P2 ทำครบแล้ว (เหลือแค่รัน bench 1M/10M รอบข้ามคืน + แปล spec นี้เป็นอังกฤษ):
+- P0: `graph.py` (Execution Graph ไม่เปลี่ยนสคีมา), efficiency 6 สูตร + ตารางเทียบ agent
+  (ธง low_sample), `risk.py` (deterministic แยก observation/recommendation)
+- P1: `observability.py` (contract `observability.json` v1), `failure.py`
+  (taxonomy 7 หมวด + recovery analytics + repeated pattern), audit states
+  (`log_denied_attempt` + 4 สถานะ + กล่อง SECURITY), views ครบ 5 มุม
+  (Overview/Task/Agent/Session/Graph)
+- P2: `bench.py` + `docs/BENCHMARKS.md` — ผล 500K: rebuild 23s / export 46s /
+  aggregate 33s / peak 347MB (แก้ O(T×N) → single-pass + compact JSON จากหลักฐานวัด)
+- เทสต์ `test_logging.py` 22 ข้อ + `test_upgrade.py` 7 ข้อ เขียวทั้ง 3 โปรเจกต์
+  (Agent/mcp/Dashboard ซิงก์แฮชตรงกัน)
+

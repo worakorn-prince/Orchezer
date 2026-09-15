@@ -26,11 +26,15 @@ projects to also exercise cross-project aggregation.
 3. **Peak RAM is data-dominated** (~0.7KB/call) and unchanged by the fixes —
    expected: rows stay in memory through the pipeline.
 
-## Larger scales
+## Larger scales (out of scope by decision 2026-09-15)
+
+1M/10M runs were intentionally dropped — 500K numbers already prove the
+pipeline scales linearly after the single-pass fixes, and larger runs need
+dedicated machine time for little extra signal. Commands kept for reference:
 
 ```powershell
-python scripts/bench.py --calls 1000000 --out bench-1m.json   # ~10 min, ~1.4GB RAM est.
-python scripts/bench.py --calls 10000000 --out bench-10m.json # overnight, ~7GB RAM est. — run alone
+python scripts/bench.py --calls 1000000 --out bench-1m.json
+python scripts/bench.py --calls 10000000 --out bench-10m.json   # needs ~GBs RAM, run alone
 ```
 
 Checkpoints are written per scale, so an interrupted run keeps finished rows.

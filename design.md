@@ -1,52 +1,61 @@
 # Manager Agent Architecture
 
-## 1. เป้าหมาย
+## 1. Goal
 
-สร้าง **Manager Agent** สำหรับ OpenCode เพื่อเป็น orchestrator ของทีม agent โดยผู้ใช้สั่งงานกับ Manager เป็นหลัก และ Manager รับผิดชอบการควบคุม workflow, task queue, agent routing และ lifecycle ของ worker sessions
+Build a **Manager Agent** for OpenCode as the orchestrator of an agent team. Users talk
+to the Manager, which owns workflow control, the task queue, agent routing, and worker
+session lifecycles.
 
-เป้าหมายสำคัญที่สุดของ version แรกคือแก้ปัญหา:
+The single most important goal of v1 is to fix this problem:
 
-> Building agent ทำงานไปจนถึง tool-call limit แล้วหยุด ทำให้ผู้ใช้ต้องเปิด session ใหม่และสั่ง "ทำต่อ" เอง
+> A Building agent works until it hits the tool-call limit and stops, forcing the user
+> to open a new session and order "continue" manually.
 
-Manager ต้องสามารถเปิด Building session ใหม่และ resume งานจาก persistent checkpoint ได้โดยอัตโนมัติ
-
----
-
-## 2. Agent ที่มีอยู่
-
-ปัจจุบันมี agent:
-
-1. **Planning** — วางแผนและวางโครงสร้างงานลง `design.md`
-2. **Building** — อ่าน `design.md` และลงมือเขียน/แก้โค้ด
-3. **Generic** — งานทั่วไปหรือ task ที่ไม่เข้ากับ role เฉพาะ
-4. **Review** — ตรวจ code, test, regression และ security
-5. **error_debug** — ดีบั๊ก วิเคราะห์ root cause และแก้ปัญหาตรรกะซับซ้อน
-6. **Manager** — orchestrator (อัปเกรดเป็น reliable orchestration layer ดู §26): รองรับ Worker Watchdog, Progress/Heartbeat, Evidence-based Completion, Idempotent Recovery, Event Log, Context Manager, Lease/Lock และ Policy/Human Approval
-7. **openvisio-planner / openvisio-builder / openvisio-reviewer** — thin wrapper ต่อโปรเจกต์ (3 โรล × 2 โปรเจกต์ = 6 ไฟล์ใต้ `.opencode/agent/`) เรียกสกิลกลาง `openvisio-graph` ก่อนค้นหา/วางแผน/รีวิวเสมอ ไม่ใช่เอเจนต์ใหม่ทั้งระบบ (ดู §25)
+The Manager must be able to open a new Building session and resume work from a
+persistent checkpoint automatically.
 
 ---
 
-## 3. หลักการสำคัญ
+## 2. Available agents
 
-Manager **ไม่ควรเป็น coding agent ตัวที่สอง**
+Current agents:
 
-Manager มีหน้าที่:
+1. **Planning** — plans work and writes the structure into `design.md`
+2. **Building** — reads `design.md` and writes/edits code
+3. **Generic** — general work or tasks that fit no specific role
+4. **Review** — reviews code, tests, regressions and security
+5. **error_debug** — debugs, analyzes root causes and fixes complex logic issues
+6. **Manager** — orchestrator (upgraded to a reliable orchestration layer, see §26):
+   Worker Watchdog, Progress/Heartbeat, Evidence-based Completion, Idempotent Recovery,
+   Event Log, Context Manager, Lease/Lock and Policy/Human Approval
+7. **openvisio-planner / openvisio-builder / openvisio-reviewer** — thin per-project
+   wrappers (3 roles × 2 projects = 6 files under `.opencode/agent/`) that always call
+   the shared `openvisio-graph` skill before searching/planning/reviewing. Not brand-new
+   agents (see §25).
 
-- รับ requirement จากผู้ใช้
-- วิเคราะห์ requirement
-- แตก task
-- จัดลำดับ task
-- เลือก agent ที่เหมาะสม
-- สร้างและควบคุม OpenCode sessions
-- ตรวจสถานะของ worker
-- ตรวจการหยุดจาก tool limit
-- เปิด session ใหม่เมื่อจำเป็น
-- resume งานจาก checkpoint
-- จัดการ failure/retry
-- ส่ง implementation ให้ Review
-- วน workflow จน task ผ่าน completion criteria
+---
 
-Building เป็นผู้รับผิดชอบ production code โดยตรง
+## 3. Key principles
+
+The Manager **must not become a second coding agent**.
+
+The Manager is responsible for:
+
+- receiving requirements from the user
+- analyzing requirements
+- breaking work into tasks
+- ordering tasks
+- selecting the right agent
+- creating and controlling OpenCode sessions
+- checking worker status
+- detecting tool-limit stops
+- opening new sessions when needed
+- resuming work from checkpoints
+- handling failure/retry
+- sending implementations to Review
+- looping the workflow until tasks pass completion criteria
+
+Building owns production code directly.
 
 ---
 
@@ -107,77 +116,77 @@ Building เป็นผู้รับผิดชอบ production code โด
 
 # 5. User Interaction Model
 
-ผู้ใช้ควรคุยกับ Manager เป็นหลัก
+Users should talk to the Manager first and foremost.
 
-ตัวอย่าง:
-
-```text
-ทำตาม design.md ให้เสร็จ
-```
-
-หรือ:
+Examples:
 
 ```text
-เพิ่ม Graph Export API
+Finish everything in design.md
 ```
 
-หรือ:
+or:
 
 ```text
-แก้ปัญหา search ที่ช้าเมื่อมี memory จำนวนมาก
+Add a Graph Export API
 ```
 
-ผู้ใช้ไม่จำเป็นต้องตัดสินใจเองว่าต้องเรียก Planning, error_debug, Building หรือ Review
+or:
 
-Manager เป็นคน routing ให้
+```text
+Fix slow search when memory volume is large
+```
+
+Users never need to decide whether to call Planning, error_debug, Building or Review.
+
+The Manager routes for them.
 
 ---
 
-# 6. Workflow หลัก
+# 6. Main Workflow
 
-## 6.1 งานใหม่จาก design.md
+## 6.1 New work from design.md
 
 ```text
 USER
  |
  v
 MANAGER
- |
- v
-อ่าน design.md
- |
- v
-ตรวจ current state
- |
- v
+  |
+  v
+Read design.md
+  |
+  v
+Check current state
+  |
+  v
 BUILDING
- |
- v
+  |
+  v
 checkpoint
- |
- v
-ถึง tool limit?
- |
- +-- NO --> ทำต่อ
- |
- +-- YES
-       |
-       v
-   Manager ตรวจ checkpoint
-       |
-       v
-   เปิด Building session ใหม่
-       |
-       v
-   resume
-       |
-       v
-   ทำต่อ
+  |
+  v
+Hit tool limit?
+  |
+  +-- NO --> continue
+  |
+  +-- YES
+        |
+        v
+    Manager checks checkpoint
+        |
+        v
+    Open new Building session
+        |
+        v
+    resume
+        |
+        v
+    continue
 ```
 
-ทำซ้ำจน implementation เสร็จ
+Repeat until the implementation is done.
 
-จากนั้น:
+Then:
 
 ```text
 BUILDING
@@ -193,17 +202,17 @@ REVIEW
                    REVIEW
 ```
 
-Review FAIL เกิน 3 รอบ → เปลี่ยนเป็น BLOCKED + แจ้งผู้ใช้ | สูงสุด 5 worker session ต่อ 1 task
+Review FAIL over 3 rounds → mark BLOCKED + notify the user | max 5 worker sessions per task
 
 ---
 
 # 7. Persistent State
 
-ไม่ควรพึ่ง conversation context ของ Building เป็นหลัก
+Never rely primarily on a Building session's conversation context.
 
-ทุก session ต้องสามารถเริ่มใหม่ได้จาก state บน disk
+Every session must be restartable from state on disk.
 
-แนะนำโครงสร้าง:
+Recommended structure:
 
 ```text
 .agent/
@@ -220,27 +229,27 @@ Review FAIL เกิน 3 รอบ → เปลี่ยนเป็น BLOCK
     └── checkpoint.json
 ```
 
-ไฟล์ runtime ใต้ `.agent/` (state.json, queue.json, checkpoint.json, events.jsonl) ต้องอยู่ใน `.gitignore` ไม่เข้า git
+Runtime files under `.agent/` (state.json, queue.json, checkpoint.json, events.jsonl) must stay in `.gitignore`, never enter git.
 
-หลักการ (ดู §26):
+Principles (see §26):
 
 - `state.json` = current truth
 - `events.jsonl` = historical truth (append-only)
-- `config.json` = policy/limits (ห้าม hard-code ใน logic)
-- `context/` = resume context ต่อ task
-- `decisions/` = decision log ต่อ task
+- `config.json` = policy/limits (never hard-code in logic)
+- `context/` = resume context per task
+- `decisions/` = decision log per task
 
 ---
 
 # 8. Manager State
 
-ไฟล์:
+File:
 
 ```text
 .agent/manager/state.json
 ```
 
-ตัวอย่าง:
+Example:
 
 ```json
 {
@@ -257,7 +266,7 @@ Review FAIL เกิน 3 รอบ → เปลี่ยนเป็น BLOCK
 }
 ```
 
-ควรเก็บอย่างน้อย:
+Should store at minimum:
 
 - schema_version
 - project
@@ -275,13 +284,13 @@ Review FAIL เกิน 3 รอบ → เปลี่ยนเป็น BLOCK
 
 # 9. Task Queue
 
-ไฟล์:
+File:
 
 ```text
 .agent/manager/queue.json
 ```
 
-ตัวอย่าง:
+Example:
 
 ```json
 {
@@ -298,7 +307,7 @@ Review FAIL เกิน 3 รอบ → เปลี่ยนเป็น BLOCK
 }
 ```
 
-Task ควรมี:
+Each task should have:
 
 - id
 - type
@@ -314,13 +323,13 @@ Task ควรมี:
 
 # 10. Building Checkpoint
 
-ไฟล์:
+File:
 
 ```text
 .agent/building/checkpoint.json
 ```
 
-ตัวอย่าง:
+Example:
 
 ```json
 {
@@ -348,41 +357,41 @@ Task ควรมี:
 }
 ```
 
-Building ควรอัปเดต checkpoint หลัง milestone สำคัญ และก่อนจบ sessionถ้าเป็นไปได้
+Building should update the checkpoint after major milestones and before a session ends, whenever possible.
 
 ---
 
 # 11. Automatic Session Resume
 
-เมื่อ Building session ติด tool-call limit:
+When a Building session hits the tool-call limit:
 
-### Manager ต้องทำ
+### The Manager must
 
-1. ตรวจว่า session หยุดแล้ว
-2. อ่าน `state.json`
-3. อ่าน `checkpoint.json`
-4. ตรวจ working tree
-5. ตรวจว่ามีงานที่ทำค้างอยู่หรือไม่
-6. สร้าง Building session ใหม่
-7. ส่ง task context ที่จำเป็น
-8. ส่ง `design.md`
-9. ส่ง `checkpoint.json`
-10. สั่งให้ทำต่อจาก `next_action`
-11. ห้ามทำ completed work ซ้ำโดยไม่จำเป็น
-12. monitor session ใหม่
-13. ทำซ้ำจน task complete
+1. verify the session has actually stopped
+2. read `state.json`
+3. read `checkpoint.json`
+4. inspect the working tree
+5. check whether unfinished work remains
+6. create a new Building session
+7. send the necessary task context
+8. send `design.md`
+9. send `checkpoint.json`
+10. order continuation from `next_action`
+11. never redo completed work unnecessarily
+12. monitor the new session
+13. repeat until the task is complete
 
-### สัญญาณดีเทกต์ (status protocol)
+### Detection signals (status protocol)
 
-- Building ต้องเขียน `checkpoint.json` พร้อมฟิลด์ `status` ทุกครั้งก่อนจบ session ค่าที่ใช้ได้: `running` | `stopped_limit` | `done` | `failed` | `blocked`
-- Manager ถือไฟล์นี้เป็น source of truth ห้ามเดาจากความเงียบ
-- ถ้าไฟล์หายหรือเก่าเกิน 1 session: กู้จาก `git diff` + ไทม์สแตมป์ไฟล์เป็นหลัก checkpoint เป็นตัวเสริม
+- Building must write `checkpoint.json` with a `status` field every time before a session ends. Valid values: `running` | `stopped_limit` | `done` | `failed` | `blocked`
+- The Manager treats this file as the source of truth — never guess from silence
+- If the file is missing or older than 1 session: recover primarily from `git diff` + file timestamps, with the checkpoint as a supplement
 
 ---
 
 # 12. Resume Prompt Contract
 
-ทุก Building session ใหม่ควรได้รับ instruction ที่มีลักษณะดังนี้:
+Every new Building session should receive instructions shaped like this:
 
 ```text
 Continue the current task.
@@ -404,50 +413,50 @@ Update checkpoint.json after meaningful milestones.
 
 Run relevant tests before reporting completion.
 
-Call the `openvisio-graph` skill (`graph-skeleton` + prove เทียบเท่า) before every resume when the task touches indexed projects (see §25).
+Call the `openvisio-graph` skill (`graph-skeleton` + equivalent proof) before every resume when the task touches indexed projects (see §25).
 ```
 
 ---
 
-# 13. การเพิ่ม Feature ใหม่ที่ไม่มีใน design.md
+# 13. Adding a feature missing from design.md
 
-ผู้ใช้ไม่ต้องรู้ว่าต้องส่งให้ agent ตัวไหน
+Users don't need to know which agent should receive the work.
 
-ผู้ใช้เพียงบอก Manager:
+The user simply tells the Manager:
 
 ```text
-เพิ่ม Graph Export API
+Add a Graph Export API
 ```
 
-Manager วิเคราะห์ impact
+The Manager analyzes impact.
 
 ## Case A — Small Change
 
-ไม่กระทบ architecture และ design หลัก:
+No impact on architecture or core design:
 
 ```text
 USER
  |
  v
 MANAGER
- |
- v
-วิเคราะห์
- |
- v
-เพิ่ม task
- |
- v
+  |
+  v
+Analyze
+  |
+  v
+Add task
+  |
+  v
 BUILDING
 ```
 
-ไม่ต้องเรียก Planning ใหม่
+No need to call Planning again.
 
 ---
 
 ## Case B — Design Change
 
-feature ต้องเพิ่มรายละเอียดใน design แต่ไม่เปลี่ยน architecture:
+The feature needs more detail in design but doesn't change architecture:
 
 ```text
 USER
@@ -472,16 +481,16 @@ Review
 
 ## Case C — Architectural Change
 
-ตัวอย่าง:
+Examples:
 
 ```text
-เปลี่ยนจาก SQLite เป็น PostgreSQL
+Switch from SQLite to PostgreSQL
 ```
 
-หรือ:
+or:
 
 ```text
-เปลี่ยน architecture ของระบบ memory
+Change the memory system architecture
 ```
 
 Workflow:
@@ -511,15 +520,15 @@ BUILDING
 REVIEW
 ```
 
-Manager ไม่ควรส่ง architectural change ตรงเข้า Building
+The Manager must never send an architectural change straight to Building.
 
 ---
 
 # 14. Change Request
 
-แนะนำให้ Manager บันทึก feature/requirement ใหม่เป็น change request
+The Manager is advised to record new features/requirements as change requests.
 
-โครงสร้าง:
+Structure:
 
 ```text
 .agent/manager/changes/
@@ -528,14 +537,14 @@ Manager ไม่ควรส่ง architectural change ตรงเข้า B
 └── CR-003.md
 ```
 
-ตัวอย่าง:
+Example:
 
 ```markdown
 # CR-001 — Graph Export API
 
 ## Request
 
-เพิ่ม API สำหรับ export memory graph เป็น JSON
+Add an API to export the memory graph as JSON
 
 ## Source
 
@@ -547,14 +556,14 @@ Medium
 
 ## Decision
 
-ต้อง update design.md ก่อน implementation
+Must update design.md before implementation
 
 ## Status
 
 planning
 ```
 
-ข้อดีคือสามารถ trace ได้ว่า requirement ใหม่มาจากไหน และ Manager ตัดสินใจอย่างไร
+The advantage is traceability: where a new requirement came from and how the Manager decided.
 
 ---
 
@@ -562,47 +571,47 @@ planning
 
 | Situation | Agent |
 |---|---|
-| วาง architecture | Planning |
-| แก้/เพิ่ม design | Planning |
-| ไม่รู้ว่า code อยู่ตรงไหน | error_debug |
-| วิเคราะห์ root cause | error_debug |
-| เขียน code | Building |
-| แก้บั๊กทั่วไป | Building |
-| แก้บั๊กตรรกะซับซ้อน | error_debug |
-| ตรวจ implementation | Review |
-| ตรวจ regression | Review |
-| ตรวจ security | Review |
-| ต้องหากราฟ/ซิมโบลก่อนลงมือ | openvisio-planner + สกิล openvisio-graph |
-| ตรวจกราฟก่อนรีวิว | openvisio-reviewer (export-verify + เทียบเบสไลน์) |
-| worker stuck / state UNKNOWN | error_debug (classify ก่อน resume — ห้าม blind resume) |
-| HIGH risk operation | approval จากผู้ใช้ก่อน (APPROVAL_REQUIRED) |
-| งานทั่วไป | Generic |
-| คุม workflow | Manager (reliable orchestration layer — ดู §26) |
+| design architecture | Planning |
+| edit/add design | Planning |
+| don't know where code lives | error_debug |
+| analyze root cause | error_debug |
+| write code | Building |
+| fix general bugs | Building |
+| fix complex logic bugs | error_debug |
+| review implementation | Review |
+| check regression | Review |
+| check security | Review |
+| need graph/symbol first | openvisio-planner + openvisio-graph skill |
+| check graph before review | openvisio-reviewer (export-verify + baseline compare) |
+| worker stuck / state UNKNOWN | error_debug (classify before resume — no blind resume) |
+| HIGH risk operation | user approval first (APPROVAL_REQUIRED) |
+| general work | Generic |
+| control workflow | Manager (reliable orchestration layer — see §26) |
 
 ---
 
 # 16. Manager Decision Rules
 
-1. Manager ห้ามแก้ production code โดยตรงใน version แรก
-2. Architectural change ต้องผ่าน Planning
-3. Unknown codebase/root-cause ให้ error_debug ก่อน
-4. Implementation ให้ Building
-5. Meaningful implementation ต้องผ่าน Review
-6. Building หยุดก่อนเสร็จ ให้ resume จาก checkpoint
-7. Building ถึง tool limit ให้เปิด session ใหม่อัตโนมัติ
-8. ห้ามถือว่า task เสร็จเพียงเพราะ Building บอกว่าเสร็จ
-9. ต้องตรวจ test/state/review ก่อน mark DONE
-10. ห้ามลบหรือ overwrite user changes ที่ไม่เกี่ยวข้อง
-11. ห้าม reset git แบบไม่ตรวจสอบ
-12. ต้องรักษา unfinished tasks ไว้ใน queue
-13. จำกัด retry เมื่อเกิด failure ซ้ำ
-14. ถ้าความต้องการคลุมเครือและมีผลต่อ implementation อย่างมีนัยสำคัญ ให้ถามผู้ใช้
+1. The Manager must not edit production code directly in v1
+2. Architectural changes must go through Planning
+3. Unknown codebase/root cause goes to error_debug first
+4. Implementation goes to Building
+5. Meaningful implementations must pass Review
+6. If Building stops early, resume from checkpoint
+7. If Building hits the tool limit, open a new session automatically
+8. Never consider a task done just because Building says so
+9. Must check tests/state/review before marking DONE
+10. Never delete or overwrite unrelated user changes
+11. Never git-reset without verification
+12. Must keep unfinished tasks in the queue
+13. Limit retries on repeated failure
+14. If requirements are ambiguous with significant implementation impact, ask the user
 
 ---
 
 # 17. State Machine
 
-Manager ควรใช้ state machine ที่ชัดเจน:
+The Manager should use an explicit state machine:
 
 ```text
 IDLE
@@ -636,7 +645,7 @@ FAILED
 CANCELLED
 ```
 
-ไม่จำเป็นต้องใช้ทุก state ใน MVP แต่ควรออกแบบให้รองรับ
+Not every state is needed in the MVP, but the design should accommodate them.
 
 ---
 
@@ -698,80 +707,80 @@ Review
 
 ## Repeated Failure
 
-หาก retry เกิน 3 ครั้ง (ค่าเริ่มต้น):
+If retries exceed 3 (default):
 
 ```text
 FAILED/BLOCKED
- |
- v
-Manager แจ้งผู้ใช้
+  |
+  v
+Manager notifies the user
 ```
 
-ไม่ควรวน retry ไม่สิ้นสุด
+Never retry forever.
 
 ---
 
 # 19. Completion Criteria
 
-Task จะถือว่า `DONE` เมื่อ (evidence-based completion gate — ดู §26):
+A task counts as `DONE` when (evidence-based completion gate — see §26):
 
-- implementation ครบตาม requirement
-- relevant tests ผ่าน (มี test result เป็น evidence)
-- ไม่มี blocker ที่ยังไม่แก้
-- Review ผ่าน (structured findings ไม่มี CRITICAL/HIGH ค้าง)
-- checkpoint ถูก update
-- manager state ถูก update
-- queue เปลี่ยนเป็น completed
-- git diff ถูกตรวจแล้ว (แยก worker changes กับ user changes)
-- งานที่แตะโปรเจกต์ที่อินเด็กซ์แล้ว: prove เทียบเท่าผ่าน + เลขกราฟใน tolerance (ดู §25)
+- implementation complete per requirements
+- relevant tests pass (test result as evidence)
+- no unresolved blockers
+- Review passes (structured findings with no outstanding CRITICAL/HIGH)
+- checkpoint updated
+- manager state updated
+- queue marked completed
+- git diff inspected (worker changes separated from user changes)
+- work touching indexed projects: equivalence proof passes + graph numbers within tolerance (see §25)
 
-ข้อห้าม:
+Prohibitions:
 
-- ห้าม mark DONE จากข้อความ "Done" ของ worker เพียงอย่างเดียว — ต้องมี evidence รองรับทุกข้อ
-- ห้ามนับ claim ของ worker เป็น verification
+- never mark DONE from a worker's "Done" message alone — every item needs supporting evidence
+- never count worker claims as verification
 
-ไม่ใช้เพียงข้อความ:
+Not sufficient as the sole completion signal:
 
 ```text
 "Done"
 ```
 
-จาก Building เป็น completion signal เพียงอย่างเดียว
+from Building.
 
 ---
 
 # 20. Git Safety
 
-Manager ต้อง:
+The Manager must:
 
-- ตรวจ working tree ก่อนเริ่มงาน
-- ไม่ reset โดยไม่จำเป็น
-- ไม่ overwrite unrelated user changes
-- ตรวจ diff ก่อน completion
-- ไม่ commit โดยอัตโนมัติใน MVP เว้นแต่ผู้ใช้อนุญาต
+- inspect the working tree before starting work
+- never reset unnecessarily
+- never overwrite unrelated user changes
+- inspect the diff before completion
+- never auto-commit in the MVP unless the user allows it
 
-Git commit/PR automation สามารถเพิ่มใน phase หลัง
+Git commit/PR automation can come in a later phase.
 
 ---
 
 # 21. MVP Scope
 
-Version แรกควรโฟกัสเพียง:
+V1 should focus only on:
 
 ```text
-1. Manager รับ task
-2. Manager สร้าง Building session
-3. Building ทำงาน
-4. Manager detect session end/tool limit
-5. Manager อ่าน checkpoint
-6. Manager เปิด Building session ใหม่
-7. Building resume
-8. ทำซ้ำจนเสร็จ
-9. ส่ง Review
-10. จบงาน
+1. Manager receives task
+2. Manager creates Building session
+3. Building works
+4. Manager detects session end/tool limit
+5. Manager reads checkpoint
+6. Manager opens new Building session
+7. Building resumes
+8. Repeat until done
+9. Send to Review
+10. Finish
 ```
 
-ยังไม่ควรเริ่มด้วย parallel agents, distributed execution หรือ autonomous coding หลายตัวพร้อมกัน
+Do not start with parallel agents, distributed execution, or multiple autonomous coders at once.
 
 ---
 
@@ -779,26 +788,26 @@ Version แรกควรโฟกัสเพียง:
 
 ## Phase 1 — Proof of Concept
 
-เป้าหมาย:
+Goal:
 
-แก้ปัญหา Building tool limit ให้ได้ก่อน
+Fix the Building tool limit problem first.
 
 Tasks:
 
-1. ตรวจ OpenCode CLI/API ที่สามารถควบคุม session ได้
-2. สร้าง Manager controller ขนาดเล็ก
-3. สร้าง Building session
-4. ส่ง task
-5. monitor session
-6. detect termination/tool limit
-7. อ่าน checkpoint
-8. สร้าง Building session ใหม่
-9. resume
-10. log transitions
+1. Survey the OpenCode CLI/API for session control
+2. Build a small Manager controller
+3. Create a Building session
+4. Send the task
+5. Monitor the session
+6. Detect termination/tool limit
+7. Read the checkpoint
+8. Create a new Building session
+9. Resume
+10. Log transitions
 
 ## Phase 2 — State Machine
 
-เพิ่ม state:
+Add states:
 
 ```text
 IDLE
@@ -814,7 +823,7 @@ DONE
 
 ## Phase 3 — Task Queue
 
-เพิ่ม:
+Add:
 
 - priority
 - dependency
@@ -824,7 +833,7 @@ DONE
 
 ## Phase 4 — Change Requests
 
-เพิ่ม automatic routing:
+Add automatic routing:
 
 ```text
 minor
@@ -839,7 +848,7 @@ architecture change
 
 ## Phase 5 — Reliability
 
-เพิ่ม:
+Add:
 
 - crash recovery
 - stale session detection
@@ -851,7 +860,7 @@ architecture change
 
 ## Phase 6 — Advanced
 
-พิจารณาภายหลัง:
+Consider later:
 
 - parallel workers
 - automatic git checkpoints
@@ -863,9 +872,9 @@ architecture change
 - Discord remote control
 - scheduled/background execution
 
-## Phase U1-U7 — Manager Upgrade (ดู §26)
+## Phase U1-U7 — Manager Upgrade (see §26)
 
-ลำดับอิมพลีเมนต์ reliable orchestration layer:
+Implementation order for the reliable orchestration layer:
 
 ```text
 U1 Watchdog          — heartbeat, progress timestamp, stale detection, recovery trigger
@@ -877,7 +886,7 @@ U6 Queue Intelligence— dependency resolver, ready-state, blocked dependency, s
 U7 Decision Trace    — decision logs, routing/recovery explanation, final summary
 ```
 
-Priority: P0 (U1-U3) ต้องเสถียรก่อน → P1 (U4-U7) → P2 (parallel/automation) ห้ามเริ่มก่อน P0/P1 เสถียร
+Priority: P0 (U1-U3) must be stable first → P1 (U4-U7) → P2 (parallel/automation) must not start before P0/P1 are stable.
 
 ---
 
@@ -886,20 +895,20 @@ Priority: P0 (U1-U3) ต้องเสถียรก่อน → P1 (U4-U7) �
 User:
 
 ```text
-เพิ่ม Graph Export API
+Add a Graph Export API
 ```
 
 Manager:
 
 ```text
-1. วิเคราะห์ requirement
-2. ตรวจ design.md
-3. ตรวจ impact
-4. พบว่าเป็น medium change
-5. เรียก Planning
-6. Planning update design.md
-7. สร้าง TASK-001
-8. ส่ง Building
+1. Analyze requirements
+2. Check design.md
+3. Check impact
+4. Found a medium change
+5. Call Planning
+6. Planning updates design.md
+7. Create TASK-001
+8. Send to Building
 ```
 
 Building Session #1:
@@ -914,10 +923,10 @@ tool limit reached
 Manager:
 
 ```text
-1. อ่าน checkpoint
-2. ตรวจ git diff
-3. สร้าง Building Session #2
-4. ส่ง checkpoint
+1. Read checkpoint
+2. Check git diff
+3. Create Building Session #2
+4. Send checkpoint
 ```
 
 Building Session #2:
@@ -967,13 +976,13 @@ Manager:
 TASK-001 = DONE
 ```
 
-ผู้ใช้ไม่ต้องเปิด session ใหม่เองเลย
+The user never has to open a new session manually.
 
 ---
 
-# 24. หลักคิดของระบบ
+# 24. System Philosophy
 
-ระบบนี้ควรถือว่า:
+This system should hold that:
 
 ```text
 Conversation = temporary
@@ -984,72 +993,72 @@ Checkpoint = recovery mechanism
 Manager = orchestrator
 ```
 
-ดังนั้นการหมด context/tool limit ของ Building ไม่ควรหมายถึงงานหยุด
+Therefore a Building context/tool limit exhaustion must not mean the work stops.
 
-มันควรหมายถึง:
+It must mean:
 
 ```text
-worker session จบ
+worker session ends
         |
         v
-manager recover
+manager recovers
         |
         v
-worker session ใหม่
+new worker session
         |
         v
-งานเดิมดำเนินต่อ
+same work continues
 ```
 
-นี่คือหลักสำคัญที่สุดของ Manager Architecture นี้
+This is the single most important principle of this Manager architecture.
 
 ---
 
 # 25. OpenVisio Skill + E2E (TASK-OV-A/B/C/D/E/F/G/H)
 
-## สกิลกลาง
+## Shared skill
 
-- ชื่อ: `openvisio-graph` (openvisio 0.3.1, เอกสารตรง CLI จริงหลัง TASK-OV-C, เป็นกลางไม่ผูกโปรเจกต์หลัง TASK-OV-G)
-- ที่อยู่เดียว (global, ไม่มี mirror ตั้งแต่ TASK-OV-H): `~/.config/opencode/skills/openvisio-graph/SKILL.md` — ทุกโปรเจกต์เรียกผ่านชื่อสกิลได้เลย
-- วิธีใช้: `skeleton [path]` ก่อนอ่านโค้ด → `find_symbol` ผ่าน MCP → implement → prove เทียบเท่า (export ซ้ำเทียบตัวเลข) → `export-verify`
-- ของไม่มีจริง (ห้ามใช้): `lookup / prove / watch-check`, `--json`, `--project`, `-o`, `--version` (ดูเวอร์ชันจาก package.json)
-- กฎเหล็ก: ทุกคำสั่งใส่ path ชัด ห้ามรันเปล่าในโฟลเดอร์งาน (bare จะทริกเกอร์ init+index)
+- Name: `openvisio-graph` (openvisio 0.3.1, docs match the real CLI since TASK-OV-C, project-neutral since TASK-OV-G)
+- Single home (global, no mirrors since TASK-OV-H): `~/.config/opencode/skills/openvisio-graph/SKILL.md` — every project calls it by skill name
+- Usage: `skeleton [path]` before reading code → `find_symbol` via MCP → implement → equivalence proof (re-export and compare numbers) → `export-verify`
+- Things that don't exist (never use): `lookup / prove / watch-check`, `--json`, `--project`, `-o`, `--version` (read the version from package.json)
+- Iron rule: every command takes an explicit path, never run bare inside a work folder (bare triggers init+index)
 
-## เมทริกซ์ 6 ไฟล์เอเจนต์
+## 6-file agent matrix
 
-| โปรเจกต์ | planner | builder | reviewer |
+| project | planner | builder | reviewer |
 |---|---|---|---|
 | Dashboard (Python/FastAPI) | `.opencode/agent/openvisio-planner.md` | `.opencode/agent/openvisio-builder.md` | `.opencode/agent/openvisio-reviewer.md` (+pytest) |
 | mcp (TS/Node) | `.opencode/agent/openvisio-planner.md` | `.opencode/agent/openvisio-builder.md` | `.opencode/agent/openvisio-reviewer.md` (+npm test) |
 
-ทุกไฟล์ประกาศ `skills: [openvisio-graph]` และอ้างเบสไลน์ของโปรเจกต์ตัวเอง
+Every file declares `skills: [openvisio-graph]` and references its own project's baseline.
 
-## เบสไลน์กราฟ (E2E tolerance: files ±3, symbols/edges ±5)
+## Graph baselines (E2E tolerance: files ±3, symbols/edges ±5)
 
-| โปรเจกต์ | files | symbols | edges |
+| project | files | symbols | edges |
 |---|---|---|---|
 | Dashboard | 69 | 227 | 169 |
 | mcp | 140 | 431 | 433 |
 
-## คำสั่ง E2E
+## E2E commands
 
 ```text
 powershell -ExecutionPolicy Bypass -File "D:\Coding_Project\Agent\scripts\e2e-openvisio.ps1"
 ```
 
-ผลลัพธ์: `D:\Coding_Project\Agent\.agent\building\e2e-ov-b.json` (ต้อง passed 5/5: skeleton 2 โปรเจกต์ + export/prove เทียบเท่า + watch freshness + token-proxy)
+Results: `D:\Coding_Project\Agent\.agent\building\e2e-ov-b.json` (must pass 5/5: 2-project skeleton + export/prove equivalence + watch freshness + token-proxy)
 
 ---
 
 # 26. Manager Upgrade Specification (Reliable Orchestration Layer)
 
-> ที่มา: สเปกอัปเกรดถูกผสานเข้า design.md ครบแล้ว (TASK-UP-0) ไฟล์ `upgrade.md`
-> ต้นฉบับถูกลบออกเมื่อ 2026-09-14 — เอกสารนี้คือ single source of truth ฉบับเดียว
-> (สเปกต้นฉบับยังเก็บไว้ที่ `.agent/manager/upgrade-spec.md` ใต้ runtime ซึ่งไม่เข้า git)
+> Origin: the upgrade spec was fully merged into design.md (TASK-UP-0); the original
+> `upgrade.md` file was deleted on 2026-09-14 — this document is the single source of truth
+> (the original spec is still kept at `.agent/manager/upgrade-spec.md` under runtime, out of git)
 
-Manager ในฐานะ reliable orchestration layer รองรับ 8 ความสามารถหลักและโครงสร้างสนับสนุน:
+As a reliable orchestration layer, the Manager supports 8 core capabilities plus supporting structures:
 
-## สถาปัตยกรรมเป้าหมาย (Target Architecture)
+## Target Architecture
 ```text
                           USER
                             |
@@ -1113,7 +1122,7 @@ Manager ในฐานะ reliable orchestration layer รองรับ 8 ค
                             DONE         BLOCKED
 ```
 
-## สถานะรันไทม์ที่คงอยู่ (Persistent Runtime State)
+## Persistent Runtime State
 ```text
 .agent/
 ├── manager/
@@ -1128,39 +1137,39 @@ Manager ในฐานะ reliable orchestration layer รองรับ 8 ค
     └── checkpoint.json
 ```
 
-## ความสามารถหลัก 8 ประการ
+## 8 Core Capabilities
 
-1. **Worker Watchdog**: ตรวจสอบสุขภาพ worker, heartbeat, progress timestamp, stale detection (heartbeat / progress / checkpoint timeout) และกระตุ้น recovery เมื่อ worker ค้างหรือตาย
-2. **Progress / Heartbeat Protocol**: บันทึก milestone, timestamp, evidence และ status lifecycle (`running`, `stopped_limit`, `done`, `failed`, `blocked`)
-3. **Evidence-Based Completion**: ห้ามเชื่อข้อความ "Done" ของ worker ลอยๆ ต้องผ่าน Evidence Check (changed files, git diff, relevant tests, test results, checkpoint, verification)
-4. **Idempotent Recovery**: รองรับ retry และ restart โดยป้องกัน duplicate worker (ใช้ operation ID / task ID + attempt) และกู้คืนจาก checkpoint / working tree / active session
-5. **Event Log**: บันทึกประวัติแบบ append-only ไว้ที่ `.agent/manager/events.jsonl` แยกจาก state.json
-6. **Context Manager**: สร้างไฟล์ resume context เฉพาะกิจ (`.agent/manager/context/<task_id>.resume.md`) เพื่อส่งเฉพาะข้อมูลที่จำเป็นไปยัง Building session ใหม่ ลด token noise
-7. **Lease / Lock**: ป้องกัน concurrent controller ด้วย lease บน state.json (`owner`, `acquired_at`, `expires_at`)
-8. **Policy / Budget / Human Approval**: ควบคุมขีดจำกัด (max sessions, review cycles, runtime), จำแนกความเสี่ยง (LOW, MEDIUM, HIGH) และบังคับ Human Approval Gate สำหรับ High-risk operations (เช่น destructive changes, database/architecture changes)
+1. **Worker Watchdog**: monitors worker health, heartbeat, progress timestamps, stale detection (heartbeat / progress / checkpoint timeouts) and triggers recovery when a worker hangs or dies
+2. **Progress / Heartbeat Protocol**: records milestones, timestamps, evidence and status lifecycle (`running`, `stopped_limit`, `done`, `failed`, `blocked`)
+3. **Evidence-Based Completion**: never trust a bare worker "Done" message — must pass an Evidence Check (changed files, git diff, relevant tests, test results, checkpoint, verification)
+4. **Idempotent Recovery**: supports retry and restart while preventing duplicate workers (operation ID / task ID + attempt) and recovers from checkpoint / working tree / active session
+5. **Event Log**: append-only history at `.agent/manager/events.jsonl`, separate from state.json
+6. **Context Manager**: builds a just-in-time resume context file (`.agent/manager/context/<task_id>.resume.md`) sending only necessary data to a new Building session, cutting token noise
+7. **Lease / Lock**: prevents concurrent controllers with a lease on state.json (`owner`, `acquired_at`, `expires_at`)
+8. **Policy / Budget / Human Approval**: enforces limits (max sessions, review cycles, runtime), classifies risk (LOW, MEDIUM, HIGH) and mandates a Human Approval Gate for high-risk operations (e.g. destructive changes, database/architecture changes)
 
-## โครงสร้างสนับสนุนเพิ่มเติม
-- Task Queue แบบรองรับ dependencies จริง (`queue.json` schema v2)
-- Manager Decision Log บันทึกเหตุผลการตัดสินใจ Routing / Recovery / Review failures (`.agent/manager/decisions/`)
-- Configuration แยกต่างหาก (`.agent/manager/config.json`)
+## Additional supporting structures
+- Truly dependency-aware Task Queue (`queue.json` schema v2)
+- Manager Decision Log recording Routing / Recovery / Review-failure rationale (`.agent/manager/decisions/`)
+- Separate configuration (`.agent/manager/config.json`)
 
-## หลักการออกแบบสำคัญ
-- **Principle 1 — Worker is disposable**: Worker session สามารถถูกทิ้งและสร้างใหม่ได้
-- **Principle 2 — State is the source of truth**: อย่าพึ่ง conversation
-- **Principle 3 — Evidence over claims**: Agent บอกว่าเสร็จ ≠ งานเสร็จ
-- **Principle 4 — Recovery over restart**: การ restart ต้องเป็น recovery ที่มี context ไม่ใช่แค่เปิด session ใหม่
-- **Principle 5 — Safe failure**: เมื่อไม่แน่ใจ ให้ BLOCKED ดีกว่าทำต่อแบบเดา
-- **Principle 6 — No infinite automation**: ทุก retry และ loop ต้องมี limit
-- **Principle 7 — Preserve user work**: Manager ต้องไม่ทำลายงานของ user เพื่อแก้ปัญหาของตัวเอง
-- **Principle 8 — Reliability before intelligence**: Manager ที่ตัดสินใจธรรมดาแต่ recover ได้ดีกว่า Manager ที่ฉลาดแต่ state พัง
+## Key design principles
+- **Principle 1 — Worker is disposable**: a worker session can be dropped and recreated
+- **Principle 2 — State is the source of truth**: never rely on conversation
+- **Principle 3 — Evidence over claims**: agent says done ≠ done
+- **Principle 4 — Recovery over restart**: a restart must be a recovery with context, not just a fresh session
+- **Principle 5 — Safe failure**: when unsure, BLOCKED beats guessing ahead
+- **Principle 6 — No infinite automation**: every retry and loop needs a limit
+- **Principle 7 — Preserve user work**: the Manager must not destroy user work to fix its own problems
+- **Principle 8 — Reliability before intelligence**: a plain-deciding Manager that recovers well beats a smart one with broken state
 
-## นิยามความสำเร็จ (Success Definition)
-Manager Upgrade จะถือว่าประสบความสำเร็จเมื่อ:
-> **ผู้ใช้สามารถมอบหมาย task ระยะยาวให้ Manager แล้ว worker session สามารถตาย, ถูกจำกัด tool-call, crash หรือถูกเปลี่ยน session ได้ โดยงานยังสามารถดำเนินต่อจาก persistent state ได้อย่างปลอดภัย และ Manager ไม่ประกาศความสำเร็จจนกว่าจะมี evidence และ verification รองรับ**
+## Success Definition
+The Manager Upgrade counts as successful when:
+> **A user can hand a long-running task to the Manager while worker sessions die, hit tool-call limits, crash or get replaced, yet the work safely continues from persistent state — and the Manager never declares success without supporting evidence and verification.**
 
 ## 26.1 Watchdog Data + Stale Detection
 
-Manager ติดตามต่อ task:
+The Manager tracks per task:
 
 ```json
 {
@@ -1172,16 +1181,16 @@ Manager ติดตามต่อ task:
 }
 ```
 
-Timeout ทั้งหมดต้องมาจาก `config.json` ห้าม hard-code: `heartbeat_timeout_seconds`, `progress_timeout_seconds`, `checkpoint_timeout_seconds`, `worker_start_timeout_seconds`
+All timeouts must come from `config.json`, never hard-coded: `heartbeat_timeout_seconds`, `progress_timeout_seconds`, `checkpoint_timeout_seconds`, `worker_start_timeout_seconds`
 
-> Session ที่ยังเปิดอยู่แต่ไม่มี progress ถือเป็น failure condition ได้
+> An open session with no progress may count as a failure condition.
 
 ## 26.2 Progress / Heartbeat Protocol
 
-Worker รายงาน lifecycle: `STARTED | PROGRESS | CHECKPOINT | BLOCKED | DONE | FAILED`
+Workers report lifecycle: `STARTED | PROGRESS | CHECKPOINT | BLOCKED | DONE | FAILED`
 
 - `status` = lifecycle (`running | stopped_limit | done | failed | blocked`)
-- `progress` = health (milestone + timestamp + evidence ไม่ใช้ percentage เป็น source of truth)
+- `progress` = health (milestone + timestamp + evidence — never use percentage as the source of truth)
 
 ```json
 {
@@ -1196,25 +1205,25 @@ Worker รายงาน lifecycle: `STARTED | PROGRESS | CHECKPOINT | BLOCKED 
 
 ## 26.3 Evidence-Based Completion Gate
 
-Manager ตรวจก่อน mark DONE:
+The Manager checks before marking DONE:
 
 ```text
 implementation complete? tests pass? blockers empty? review pass?
 checkpoint updated? manager state updated? queue state updated?
 ```
 
-Evidence ขั้นต่ำ: changed files, git diff, relevant tests + test result, checkpoint, requirement coverage, review result สำหรับ indexed project ต้องผ่าน OpenVisio verification (ดู §25)
+Minimum evidence: changed files, git diff, relevant tests + test results, checkpoint, requirement coverage, review results. For indexed projects, OpenVisio verification must pass (see §25).
 
 ## 26.4 Idempotent Recovery
 
-- Idempotency key: `task_id:operation:attempt` (เช่น `TASK-001:BUILD:003`)
-- ก่อนสร้าง session ใหม่ต้อง discover active session ก่อน: พบ → recover existing, ไม่พบ → create new
-- ห้าม blindly create duplicate session หลัง Manager restart
-- ทุก lifecycle operation ต้อง retry ได้โดยไม่สร้างผลซ้ำ
+- Idempotency key: `task_id:operation:attempt` (e.g. `TASK-001:BUILD:003`)
+- Before creating a new session, discover active sessions first: found → recover existing, not found → create new
+- Never blindly create duplicate sessions after a Manager restart
+- Every lifecycle operation must be retryable without duplicate side effects
 
 ## 26.5 Event Log
 
-ไฟล์ `.agent/manager/events.jsonl` append-only:
+The `.agent/manager/events.jsonl` file is append-only:
 
 ```json
 {"event":"TASK_CREATED","task":"TASK-001","time":"..."}
@@ -1226,11 +1235,11 @@ Evidence ขั้นต่ำ: changed files, git diff, relevant tests + test r
 {"event":"TASK_DONE","task":"TASK-001"}
 ```
 
-Event ที่ต้องมี: task created/queued/started, worker created/stopped/limit, checkpoint, recovery, resume, review started/failed/passed, blocked, failed, cancelled, done — ทุก event มี timestamp + task ID
+Required events: task created/queued/started, worker created/stopped/limit, checkpoint, recovery, resume, review started/failed/passed, blocked, failed, cancelled, done — every event carries a timestamp + task ID
 
 ## 26.6 Context Manager
 
-สร้าง `.agent/manager/context/TASK-xxx.resume.md` แทนการส่ง conversation ทั้งหมด:
+Build `.agent/manager/context/TASK-xxx.resume.md` instead of sending the whole conversation:
 
 ```markdown
 # Resume Context
@@ -1239,7 +1248,7 @@ Important decisions: / Files changed: / Known issues:
 Next action: / Do not redo:
 ```
 
-Priority การส่ง context: Resume Context > Checkpoint > Current State > Relevant design section > Working tree > Relevant files ห้ามส่ง conversation/log/source ทั้ง repo โดยไม่จำเป็น
+Context send priority: Resume Context > Checkpoint > Current State > Relevant design section > Working tree > Relevant files. Never send whole conversations/logs/the entire repo source unless necessary.
 
 ## 26.7 Lease / Lock
 
@@ -1247,7 +1256,7 @@ Priority การส่ง context: Resume Context > Checkpoint > Current State
 { "lock": { "owner": "manager-01", "acquired_at": "ISO-8601", "expires_at": "ISO-8601" } }
 ```
 
-ใช้ lease แทน permanent lock — lease expired → Manager ใหม่ recover ได้ ป้องกัน: task ถูก execute สองครั้ง, worker ถูกควบคุมโดย Manager สอง instance, duplicate recovery
+Use leases instead of permanent locks — an expired lease lets a new Manager recover. Prevents: a task executed twice, a worker controlled by two Manager instances, duplicate recovery.
 
 ## 26.8 Policy / Budget / Human Approval
 
@@ -1260,11 +1269,11 @@ Priority การส่ง context: Resume Context > Checkpoint > Current State
 }
 ```
 
-Risk: LOW → automatic, MEDIUM → ตาม policy, HIGH → APPROVAL_REQUIRED (เช่น เปลี่ยน database, ลบ API, เปลี่ยน auth, ลบไฟล์จำนวนมาก, major dependency upgrade, git reset, destructive operation) Manager ห้าม bypass approval gate
+Risk: LOW → automatic, MEDIUM → per policy, HIGH → APPROVAL_REQUIRED (e.g. changing databases, deleting APIs, changing auth, deleting many files, major dependency upgrades, git reset, destructive operations). The Manager must never bypass the approval gate.
 
 ## 26.9 Dependency-Aware Queue
 
-Queue states: `pending | ready | running | blocked | failed | completed | cancelled` — Manager ตรวจ `dependency complete?` ก่อน dispatch task ที่ dependency ยังไม่ผ่านต้องไม่ถูก dispatch
+Queue states: `pending | ready | running | blocked | failed | completed | cancelled` — the Manager checks `dependency complete?` before dispatch. Tasks whose dependencies haven't passed must not be dispatched.
 
 ## 26.10 Enhanced State Machine
 
@@ -1276,7 +1285,7 @@ REVIEWING → PASS → VERIFYING → DONE | BLOCKED
 Additional: FAILED, CANCELLED, APPROVAL_REQUIRED, RECOVERING
 ```
 
-`RECOVERING` แยก recovery process ออกจาก normal building
+`RECOVERING` separates the recovery process from normal building.
 
 ## 26.11 Recovery Protocol
 
@@ -1287,165 +1296,177 @@ WORKER STOP → MANAGER DETECT → ACQUIRE LOCK → READ STATE → READ CHECKPOI
 
 Classification: `LIMIT | CRASH | STUCK | FAILED | DONE | BLOCKED | UNKNOWN`
 - LIMIT/CRASH/STUCK → RECOVER → NEW SESSION → RESUME
-- UNKNOWN → ERROR_DEBUG → CLASSIFY (ห้าม blind resume)
+- UNKNOWN → ERROR_DEBUG → CLASSIFY (no blind resume)
 
-Manager ห้าม: blind git reset/checkout/delete/overwrite, blind retry forever, blind create duplicate session, blind mark DONE ก่อน destructive operation ต้องผ่าน policy ก่อน recovery ต้องรัน `git status` + `git diff` เพื่อแยก worker changes กับ user changes — ห้าม assume ว่าทุก diff เป็นของ worker
+The Manager must never: blind git reset/checkout/delete/overwrite, blind retry forever, blind create duplicate sessions, blind mark DONE. Destructive operations must pass policy first. Recovery must run `git status` + `git diff` to separate worker changes from user changes — never assume every diff belongs to the worker.
 
 ## 26.12 Review Loop + Observability
 
-Review ต้อง produce structured findings:
+Reviews must produce structured findings:
 
 ```json
 { "status": "failed", "findings": [ { "severity": "high", "file": "src/example.ts", "issue": "missing validation", "required_action": "add input validation" } ] }
 ```
 
-Manager ใช้ findings เป็น input ให้ Building รอบถัดไป
+The Manager feeds findings as input to the next Building round.
 
-Log levels: `INFO | WARN | ERROR | RECOVERY | SECURITY` — ทุก log มี timestamp, task_id, agent, session_id, event, message เป้าหมาย: reconstruct เหตุการณ์ย้อนหลังได้
+Log levels: `INFO | WARN | ERROR | RECOVERY | SECURITY` — every log carries timestamp, task_id, agent, session_id, event, message. Goal: reconstruct past events.
 
 ## 26.13 Decision Log
 
-ไฟล์ `.agent/manager/decisions/TASK-xxx.md` บันทึก: Routing (selected + reason), Recovery (decision + ที่มา), Review Failure (finding + decision), Final — เป้าหมาย: ย้อนดูได้ว่า Manager ตัดสินใจอะไรและเพราะอะไร
+`.agent/manager/decisions/TASK-xxx.md` records: Routing (selected + reason), Recovery (decision + source), Review Failure (finding + decision), Final — goal: retrace what the Manager decided and why.
 
-## 26.14 Acceptance Criteria (ย่อ)
+## 26.14 Acceptance Criteria (summary)
 
-| หมวด | เกณฑ์ |
+| Area | Criteria |
 |---|---|
-| Recovery | detect limit/stop/stuck, recover จาก checkpoint, ไม่ duplicate, resume ได้, recover หลัง restart |
-| State | state/checkpoint/event log persistent, lease ทำงาน, transition ถูกต้อง |
-| Verification | ไม่ mark DONE จาก claim เดียว, ตรวจ tests/diff/review/blockers, indexed ผ่าน verification |
-| Reliability | retry จำกัด, ไม่มี infinite loop, preserve user changes, recovery idempotent |
-| Context | สร้าง+ใช้ resume context, ไม่พึ่ง conversation เก่า |
-| Safety | destructive ผ่าน policy, architecture ผ่าน approval, ไม่ auto git reset/commit |
+| Recovery | detect limit/stop/stuck, recover from checkpoint, no duplicates, resumable, recover after restart |
+| State | state/checkpoint/event log persistent, lease works, transitions correct |
+| Verification | never mark DONE from a single claim, check tests/diff/review/blockers, indexed projects pass verification |
+| Reliability | bounded retries, no infinite loops, preserve user changes, idempotent recovery |
+| Context | build + use resume context, never rely on old conversations |
+| Safety | destructive ops pass policy, architecture passes approval, no auto git reset/commit |
 
-Test scenarios ต้องมี: T01 normal, T02 tool limit, T03 multiple limits, T04 crash, T05 stuck, T06 review fail, T07 repeated failure, T08 duplicate protection, T09 user changes, T10 approval
+Required test scenarios: T01 normal, T02 tool limit, T03 multiple limits, T04 crash, T05 stuck, T06 review fail, T07 repeated failure, T08 duplicate protection, T09 user changes, T10 approval
 
 ## 26.15 Tool-call Logging + Metrics + Dashboard (TASK-LOG-001 → 002 → 003)
 
-ชั้น observability แบบ evidence-based ครอบ tool call / dispatch / result ของ worker
-โดยไม่แตะ logic เดิมของ `manager.py` (เพิ่มเฉพาะฟังก์ชันใหม่ + mirror event คู่กัน)
+Evidence-based observability over worker tool calls / dispatches / results
+without touching existing `manager.py` logic (new functions only + mirrored events).
 
-### Schema `tool-calls.jsonl` (append-only, 1 บรรทัด = 1 record, UTF-8)
+### Schema `tool-calls.jsonl` (append-only, 1 line = 1 record, UTF-8)
 
-ไฟล์: `.agent/manager/tool-calls.jsonl` (runtime — อยู่ใน `.gitignore` ไม่เข้า git)
+File: `.agent/manager/tool-calls.jsonl` (runtime — gitignored, never enters git)
 
-| ฟิลด์ | ชนิด | หมายเหตุ |
+| Field | Type | Notes |
 |---|---|---|
-| `time` | string ISO-8601 UTC | เวลาเกิด event |
-| `task` | string | task id (เช่น TASK-LOG-001) |
-| `attempt` | integer | session attempt (สอดคล้อง `state.json` attempt) |
+| `time` | string ISO-8601 UTC | event time |
+| `task` | string | task id (e.g. TASK-LOG-001) |
+| `attempt` | integer | session attempt (matches `state.json` attempt) |
 | `session_id` | string | worker session id |
 | `agent` | enum | `planning` \| `building` \| `review` \| `error_debug` \| `manager` |
-| `operation` | enum | `DISPATCH` \| `CALL` \| `RESULT` |
-| `tool` | string | ชื่อ tool (เช่น read/edit/test) — ว่างได้สำหรับ DISPATCH |
-| `duration_ms` | integer | เวลาที่ใช้ (RESULT บังคับ, CALL/DISPATCH ให้ 0) |
-| `status` | enum | `ok` \| `error` \| `blocked` \| `limit` |
-| `error` | string/`null` | ข้อความ error (ไม่มี = `null`) |
-| `prompt_hash` | string | sha256 ของ prompt 12 หลักแรก ห้ามเก็บ secret/prompt เต็ม |
+| `operation` | enum | `DISPATCH` \| `CALL` \| `RESULT` (`ATTEMPT` for denied attempts) |
+| `tool` | string | tool name (e.g. read/edit/test) — may be empty for DISPATCH |
+| `duration_ms` | integer | elapsed time (required for RESULT, 0 for CALL/DISPATCH) |
+| `status` | enum | `ok` \| `error` \| `blocked` \| `limit` \| `denied` |
+| `error` | string/`null` | error text (`null` when none) |
+| `prompt_hash` | string | first 12 hex chars of prompt sha256 — never store secrets/full prompts |
+| `tokens_in` / `tokens_out` | integer/`null` | filled by the caller when known (e.g. from an API response), no default |
 
-### 6 Metrics + สูตร (`scripts/metrics.py --rebuild`)
+### 6 Metrics + formulas (`scripts/metrics.py --rebuild`)
 
-อ่าน `events.jsonl` + `tool-calls.jsonl` แล้วคำนวณต่อ task (รันซ้ำได้ผลเท่าเดิม = idempotent):
+Reads `events.jsonl` + `tool-calls.jsonl` and computes per task (re-runnable with identical results = idempotent):
 
-| Metric | สูตร |
+| Metric | Formula |
 |---|---|
-| `sessions_per_task` | นับ `WORKER_STARTED` / `WORKER_RESUMED` ต่อ task |
-| `tool_calls_per_task` | นับแถว `tool-calls.jsonl` ต่อ task |
-| `recovery_count` | นับ `RECOVERY_STARTED` ต่อ task |
-| `review_loop` | นับ `REVIEW_FAILED` ต่อ task — เกิน `max_review_cycles=3` ใน `config.json` → `BLOCKED` |
-| `time_to_DONE` | `TASK_DONE.time − TASK_CREATED.time` (วินาที, ไม่มี = `null`) |
-| `success_rate` | `DONE / (DONE + failed + cancelled)` ระดับภาพรวม (0–1) |
+| `sessions_per_task` | count `WORKER_STARTED` / `WORKER_RESUMED` per task |
+| `tool_calls_per_task` | count non-denied `tool-calls.jsonl` rows per task |
+| `recovery_count` | count `RECOVERY_STARTED` per task |
+| `review_loop` | count `REVIEW_FAILED` per task — over `max_review_cycles=3` in `config.json` → `BLOCKED` |
+| `time_to_DONE` | `TASK_DONE.time − TASK_CREATED.time` (seconds, `null` when absent) |
+| `success_rate` | `DONE / (DONE + failed + cancelled)` overall (0–1) |
 
-### Interception points 3 ฟังก์ชัน (`scripts/manager.py` — เพิ่มเท่านั้น)
+Plus (added later, same rebuild): `denied_attempts`, `recovery_tokens`, `review_passed`,
+efficiency block (token/tools per success, recovery cost, session efficiency, review
+rework + per-agent comparison with low-sample flag), daily `history/` snapshots.
 
-1. `log_tool_call(...)` — เขียน 1 record ลง `tool-calls.jsonl` **พร้อม**
-   `log_event("TOOL_CALL", ...)` คู่กันใน `events.jsonl` (mirror 2 ไฟล์ทุกครั้ง)
-2. `log_dispatch(task_id, agent, session_id, attempt)` — บันทึก `operation=DISPATCH`
-   ตอน Manager ส่งงานให้ worker ทุกครั้ง **พร้อม** `WORKER_STARTED` คู่กัน
-3. `wrap_task(task_id, agent, session_id, tool, prompt_text, fn, ...)` — wrapper จับเวลา
-   `duration_ms` + คำนวณ `prompt_hash` (sha256 12 หลักแรก) + กำหนด
-   `status` (`ok`/`error`/`blocked`/`limit`) + `error` แล้วเรียก `log_tool_call()` ตอนจบ
+### Interception: 3+ functions (`scripts/manager.py` — additive only)
 
-### วิธีรัน
+1. `log_tool_call(...)` — writes 1 record to `tool-calls.jsonl` **plus**
+   a mirrored `log_event("TOOL_CALL", ...)` in `events.jsonl` (both files every time)
+2. `log_dispatch(task_id, agent, session_id, attempt)` — records `operation=DISPATCH`
+   whenever the Manager hands work to a worker, **plus** a paired `WORKER_STARTED`
+3. `wrap_task(task_id, agent, session_id, tool, prompt_text, fn, ...)` — timing wrapper:
+   measures `duration_ms` + computes `prompt_hash` (first 12 hex of sha256) + sets
+   `status` (`ok`/`error`/`blocked`/`limit`) + `error`, then calls `log_tool_call()` at the end
+4. `log_denied_attempt(...)` — records `status="denied"` attempts (never counted as
+   successful calls) + `TOOL_DENIED` event for the permission audit
+
+### How to run
 
 ```text
-python scripts/metrics.py --rebuild        # คำนวณ 6 metrics → .agent/manager/metrics.json
+python scripts/metrics.py --rebuild        # compute metrics → .agent/manager/metrics.json
 python scripts/export_json.py              # export → dashboard/data.json
 ```
 
-เปิดแดชบอร์ด: ดับเบิลคลิก `dashboard/index.html` หรือ
-`python -m http.server` แล้วเปิด `dashboard/index.html`
-(กราฟ 4 ชุด: bar tool calls, line timeline, pie success_rate, bar sessions/recovery/review)
+Open the dashboard: double-click `dashboard/index.html`, or run
+`python -m http.server` then open `dashboard/index.html`
+(5 charts: bar tool calls, line timeline, pie success_rate, bar sessions/recovery/review, line trend).
 
-กดทีเดียวจบ: ดับเบิลคลิก `run_dashboard.bat` (repo root) — รัน rebuild +
-export + aggregate ข้ามโปรเจกต์ + เสิร์ฟ `http://localhost:8080/dashboard/all.html`
-(จอรวม Agent+mcp+Dashboard) + เปิดเบราว์เซอร์ให้เอง
-(ใช้ `http.server` เพราะเปิดผ่าน `file://` แล้ว `fetch(data.json)` โดนบล็อก)
+One-click: double-click `run_dashboard.bat` (repo root, Windows) or `sh run_dashboard.sh`
+(macOS/Linux) — rebuilds + exports + cross-project aggregate + serves
+`http://localhost:8080/dashboard/all.html` (combined Agent+mcp+Dashboard view,
+auto-discovers sibling projects) + opens the browser itself
+(uses `http.server` because opening via `file://` gets `fetch(data.json)` blocked).
 
-รันเทสต์:
+Run tests:
 
 ```text
-python -m unittest discover -s scripts -p test_logging.py -v   # 14 ข้อ (a-k + f2)
-python -m unittest discover -s scripts -p test_upgrade.py -v   # U1-U7 เดิม 7/7
+python -m unittest discover -s scripts -p test_logging.py -v   # 22 tests
+python -m unittest discover -s scripts -p test_upgrade.py -v   # original U1-U7, 7/7
 ```
 
-เทสต์ใน `scripts/test_logging.py` ใช้ tmp dir / task id `TEST-*` แล้วลบข้อมูลทดสอบทิ้งเอง
-ห้ามเขียนทับ `queue.json` / `checkpoint.json` / event จริง (ห้ามเหลือ `TEST-*` ในไฟล์จริง)
+Tests in `scripts/test_logging.py` use a tmp dir / `TEST-*` task ids and clean up after
+themselves. Never overwrite real `queue.json` / `checkpoint.json` / events (no `TEST-*`
+leftovers in real files).
 
-### ไฟล์ runtime ใน `.gitignore`
+### Runtime files in `.gitignore`
 
-`.agent/` (รวม `tool-calls.jsonl`, `events.jsonl`, `metrics.json`, `state.json`,
-`queue.json`, `checkpoint.json`) และ `.openvisio/` ไม่เข้า git
+`.agent/` (including `tool-calls.jsonl`, `events.jsonl`, `metrics.json`, `state.json`,
+`queue.json`, `checkpoint.json`, `history/`, `reviews/`, `observability.json`) and `.openvisio/`
+never enter git. Dashboard runtime JSON (`dashboard/data.json`, `dashboard/all-projects.json`)
+is gitignored too; only the `.html` viewers are committed.
 
 ### Rotation guard 1MB
 
-เมื่อ `tool-calls.jsonl` เกิน 1MB (`1048576` bytes) จะเขียน event `TOOLCALLS_GROWING`
-เตือนให้ทำ rotation (เช่น แยกไฟล์ราย task) — ไม่ลบข้อมูลอัตโนมัติ
+Past 1MB (`1048576` bytes) of `tool-calls.jsonl`, a `TOOLCALLS_GROWING` event is written
+recommending rotation (e.g. split per task) — never auto-deletes data.
 
-### นโยบายไม่เก็บ secret
+### No-secret policy
 
-เก็บเฉพาะ `prompt_hash` (12 หลักแรกของ sha256) ห้ามเก็บ prompt เต็ม ห้ามเก็บ secret
-(api key / password / token) ลง log เด็ดขาด — ตรวจย้อนหลังได้จาก `prompt_hash`
-โดยไม่มีข้อมูลอ่อนไหวหลุดลง disk
+Store only `prompt_hash` (first 12 hex of sha256). Never store full prompts or secrets
+(api keys / passwords / tokens) in logs — `prompt_hash` allows after-the-fact correlation
+with nothing sensitive on disk.
 
-### ส่วนขยาย observability (เฟส 2 — ทั้ง 9 หัวข้อ)
+### Observability extensions (phase 2 — all 9 areas)
 
-1. **ฟีดกิจกรรม + errors**: `export_json.build_extra()` ดึง 20 รายการล่าสุดจาก
-   `events.jsonl` และแถว `status=error` จาก `tool-calls.jsonl` (ตัดข้อความ 300 ตัวอักษร)
-2. **สุขภาพคิว**: อ่าน `queue.json` นับ `by_status` + ลิสต์ id ที่ `blocked/failed`
-3. **เวลา**: สถิติ `duration_ms` ต่อทูล (avg/P95, top 10) จาก tool-calls
-4. **แยกตามเอเจนต์**: sessions (จาก WORKER_STARTED/WORKER_RESUMED) + calls/tokens/errors ต่อ agent
-5. **Tokens**: `log_tool_call(..., tokens_in, tokens_out)` (สคีมา 13 ฟิลด์) รวมต่อ task/รวม
-   — ผู้เรียกกรอกเองเมื่อทราบ (เช่น จาก API response) ไม่มีค่า default
-6. **ไฟล์ที่แตะบ่อย**: รวม `files_changed` ใน building checkpoint ข้ามโปรเจกต์ (top 10)
-7. **ผลรีวิว**: รีวิวต้องเรียก `save_review(task_id, status, findings)` ทุกครั้ง
-   เขียน `reviews/<task>.json` (`severity: critical|major|minor`) แดชบอร์ดนับตาม severity
-8. **Alerts**: `STUCK` (ไม่มีอีเวนต์เกิน 6 ชม. งานยังไม่จบ), `REVIEW_AT_RISK`
-   (review_loop ใกล้ `max_review_cycles`), `QUEUE_BLOCKED/FAILED`
-9. **เทรนด์**: `metrics.py --rebuild` เขียน snapshot `history/YYYY-MM-DD.json`
-   (เก็บ 90 วัน) แดชบอร์ดวาดเส้น done/tool_calls รายวัน (รวม + แยกโปรเจกต์)
-10. **จอรวม**: `aggregate.py` รวมทุกหัวข้อข้ามโปรเจกต์ (default สแกนโฟลเดอร์พี่น้อง
-    ที่มี `.agent/manager/metrics.json` อัตโนมัติ ปรับได้ด้วย `--projects`) → `dashboard/all-projects.json`
-    ดูที่ `dashboard/all.html` — โปรเจกต์ที่ยังไม่ rebuild จะขึ้น SKIP ไม่พังทั้งจอ
-11. **Tool inventory ละเอียด** (`scripts/tools_inventory.py`): catalog ทูล 24 ตัว
-    (file/exec/search/orchestration/web/memory/graph) + อ่าน `permission:` จากนิยาม
-    เอเจนต์ทั้ง 6 ตัว + ผสานยอดเรียกจริงจาก `tool-calls.jsonl` ได้เมทริกซ์
-    "ทูล × เอเจนต์ (อนุญาต/ห้าม/เรียกจริง/พัง/ใช้ล่าสุด)" — ทูลนอก catalog ขึ้นหมวด
-    `observed` ให้เอง หลักการ: **ทูลมากับ harness ไม่ได้มากับโมเดล**
-    (โมเดลเป็น engine) สิ่งที่ต่างกันคือสิทธิ์รายเอเจนต์ ดูได้ที่ตาราง
-    tbl-tools/tbl-perm ทั้งสองจอ
+1. **Activity feed + errors**: `export_json.build_extra()` pulls the latest 20 rows from
+   `events.jsonl` and `status=error` rows from `tool-calls.jsonl` (messages cut at 300 chars)
+2. **Queue health**: reads `queue.json`, counts `by_status` + lists `blocked/failed` ids
+3. **Timing**: `duration_ms` stats per tool (avg/P95, top 10) from tool-calls
+4. **Per-agent split**: sessions (from WORKER_STARTED/WORKER_RESUMED) + calls/tokens/errors per agent
+5. **Tokens**: `log_tool_call(..., tokens_in, tokens_out)` (13-field schema), totals per task/overall
+   — callers fill them in when known (e.g. from an API response), no default
+6. **Touched files**: merges `files_changed` from building checkpoints cross-project (top 10)
+7. **Review results**: reviews must call `save_review(task_id, status, findings)` every time,
+   writing `reviews/<task>.json` (`severity: critical|major|minor`); dashboards count by severity
+8. **Alerts**: `STUCK` (no events for 6h+ on unfinished work), `REVIEW_AT_RISK`
+   (review_loop near `max_review_cycles`), `QUEUE_BLOCKED/FAILED`
+9. **Trend**: `metrics.py --rebuild` writes `history/YYYY-MM-DD.json` snapshots
+   (90 days kept); dashboards draw daily done/tool_calls lines (combined + per project)
+10. **Combined view**: `aggregate.py` merges all areas cross-project (default auto-scans
+    sibling folders with `.agent/manager/metrics.json`, overridable with `--projects`) →
+    `dashboard/all-projects.json`, viewed at `dashboard/all.html` — projects not yet rebuilt
+    show SKIP without breaking the page
+11. **Fine-grained tool inventory** (`scripts/tools_inventory.py`): 24-tool catalog
+    (file/exec/search/orchestration/web/memory/graph) + reads `permission:` from all 6
+    agent definitions + merges real call counts from `tool-calls.jsonl` into a
+    "tool × agent (allowed/denied/called/failed/last-used)" matrix — off-catalog tools fall
+    under `observed`. Principle: **tools ship with the harness, not the model**
+    (the model is the engine); what differs is per-agent permission. See the
+    tbl-tools/tbl-perm tables on both dashboards.
 
 ### v0.2.0 roadmap completion (Agent Observatory)
 
-Roadmap P0+P1+P2 ทำครบแล้ว (เหลือแค่รัน bench 1M/10M รอบข้ามคืน + แปล spec นี้เป็นอังกฤษ):
-- P0: `graph.py` (Execution Graph ไม่เปลี่ยนสคีมา), efficiency 6 สูตร + ตารางเทียบ agent
-  (ธง low_sample), `risk.py` (deterministic แยก observation/recommendation)
-- P1: `observability.py` (contract `observability.json` v1), `failure.py`
-  (taxonomy 7 หมวด + recovery analytics + repeated pattern), audit states
-  (`log_denied_attempt` + 4 สถานะ + กล่อง SECURITY), views ครบ 5 มุม
+Roadmap P0+P1+P2 is done (only overnight 1M/10M bench runs remain):
+- P0: `graph.py` (Execution Graph, no schema change), 6 efficiency formulas + agent
+  comparison table (low_sample flag), `risk.py` (deterministic, observation/recommendation split)
+- P1: `observability.py` (`observability.json` v1 contract), `failure.py`
+  (7-category taxonomy + recovery analytics + repeated patterns), audit states
+  (`log_denied_attempt` + 4 states + SECURITY box), all 5 views
   (Overview/Task/Agent/Session/Graph)
-- P2: `bench.py` + `docs/BENCHMARKS.md` — ผล 500K: rebuild 23s / export 46s /
-  aggregate 33s / peak 347MB (แก้ O(T×N) → single-pass + compact JSON จากหลักฐานวัด)
-- เทสต์ `test_logging.py` 22 ข้อ + `test_upgrade.py` 7 ข้อ เขียวทั้ง 3 โปรเจกต์
-  (Agent/mcp/Dashboard ซิงก์แฮชตรงกัน)
+- P2: `bench.py` + `docs/BENCHMARKS.md` — 500K results: rebuild 23s / export 46s /
+  aggregate 33s / peak 347MB (O(T×N) → single-pass + compact JSON, evidence-based)
+- `test_logging.py` 22 tests + `test_upgrade.py` 7 tests green in all 3 projects
+  (Agent/mcp/Dashboard hash-synced)
 

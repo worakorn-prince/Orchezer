@@ -13,3 +13,9 @@ __pycache__/
 
 # Thai README — local only, not pushed to GitHub
 readme.th.md
+
+# Internal notes — local only, not pushed to GitHub
+readme.local.md
+
+# Full internal spec — local only; public gets design.github.md instead
+design.md

@@ -621,6 +621,8 @@ The advantage is traceability: where a new requirement came from and how the Man
 | HIGH risk operation | user approval first (APPROVAL_REQUIRED) |
 | general work | Generic |
 | control workflow | Manager (reliable orchestration layer — see §26) |
+| cloudflare audit (explicit full 6-phase audit) | Review + cloudflare-security-audit skill (checklist + validator, guidance default, severity CRITICAL/HIGH/MEDIUM/LOW, needs_validation blocker) |
+| security review (default) | Review + security-reviewer (never call cloudflare, fast SAST path) |
 
 ---
 
@@ -1068,6 +1070,11 @@ This is the single most important principle of this Manager architecture.
 - Things that don't exist (never use): `lookup / prove / watch-check`, `--json`, `--project`, `-o`, `--version` (read the version from package.json)
 - Iron rule: every command takes an explicit path, never run bare inside a work folder (bare triggers init+index)
 
+### Cloudflare global skill (TASK-CF-005)
+- Single home (global, no mirrors): `~/.config/opencode/skills/cloudflare-security-audit/SKILL.md`, validator รายรีโป `scripts/cloudflare-audit-validate.cjs`.
+- Trigger แยกขาด: `cloudflare audit` (full 6-phase audit) vs `security review` (default fast SAST, never call cloudflare).
+- Guidance default: ถ้ากำกวมถาม 1 คำถามก่อนรัน full audit.
+
 ## 6-file agent matrix
 
 | project | planner | builder | reviewer |
@@ -1446,6 +1453,33 @@ Log levels: `INFO | WARN | ERROR | RECOVERY | SECURITY` — every log carries ti
 | Traceability | every recovery decision recorded with evidence, operation records, event/state consistency |
 
 Required test scenarios: T01 normal, T02 tool limit, T03 multiple limits, T04 crash, T05 stuck, T06 review fail, T07 repeated failure, T08 duplicate protection, T09 user changes, T10 approval, **plus T11-T22 (see §27)** — P0 `T02 T03 T04 T05 T08 T11 T12 T13 T14 T15 T16 T17` must pass before aggressive autonomous recovery.
+
+## 26.15 Cloudflare Security Audit — Light Adapt (6-Phase) (fix.md §15 + skill `cloudflare-security-audit` v1.0.0-light)
+
+*ทริกเกอร์แยกเด็ดขาด:* `cloudflare audit` → สกิลนี้เท่านั้น (ใช้ `scripts/cloudflare-audit-validate.cjs` + checklist `.agent/manager/context/cloudflare-adapt.checklist.md`) — `security review` → `security-reviewer` เท่านั้น ห้ามเรียกสลับกัน (ดู `decisions/TASK-CF-002.md`)
+
+**โหมดค่าเริ่มต้น (Guidance):** โหลดสกิล ≠ สั่งออดิตเต็มรูป — ตอบเป็นไกด์ไลน์ ไม่สร้าง output dir ไม่รัน 6 phases — ถ้ากำกวมให้ถาม 1 คำถามก่อน — สั่งออดิตเต็มรูปต้องมีคำชัด `audit` / `pen-test` / `full` / `comprehensive` / `end-to-end` หรือขอ report artifact
+
+**กฎความปลอดภัย (Safety):** อ่านซอร์สอย่างเดียว ไม่แก้ไฟล์ — รันโค้ด target ได้เฉพาะใน OS sandbox (no external network + empty env allowlist + target/toolchain read-only + เขียนได้แค่ `scratch/` ของตัวเอง) — ต้องมี CPU/mem/time limits ถ้าไม่มีให้ตอบเป็น `needs_validation` blocker แทน — output dir อยู่นอก target (`~/security-audit-skill/<repo>/run-<N>`) ยกเว้นผู้ใช้ยืนยันพาธ git-ignored ใน target — `agent-id` ต้อง lowercase (เลี่ยง `con`/`prn`/`aux` บน Windows)
+
+**Severity mapping เดียวกับ Manager (FIX-11):** `critical` → `CRITICAL`, `high` → `HIGH`, `medium` → `MEDIUM`, `low`/`informational`/`info` → `LOW` (ห้ามตัด `informational` ทิ้ง) — `needs_validation` ห้ามมี severity ส่งเป็น blocker (`blockers` + `validation_plan` อย่างน้อย 1 entry) — `confirmed` ต้องมี `likelihood`/`impact`/`overall_severity` ครบ และ `overall_severity <= impact` — ทุก record ต้องมี fingerprint + trace ตั้งแต่ entrypoint → sink
+
+**Validator ก่อน `save_review`:** ถ้ามี `scripts/cloudflare-audit-validate.cjs` ในโปรเจกต์ ให้รันก่อนเสมอ:
+```bash
+node scripts/cloudflare-audit-validate.cjs findings.json
+```
+ถ้าไม่มีไฟล์ (นอก repo Agent) ให้ตรวจมือตามกฎเดียวกัน หรือตอบเป็น `needs_validation` blocker แล้วบอกให้ copy validator จาก repo Agent
+
+**6-Phase ที่ Manager ต้องออร์เคสตรา (เมื่อผู้ใช้พิมพ์ `cloudflare audit` ชัด):**
+```text
+1. เตรียม sandbox — สร้าง scratch/ นอก target, ตั้ง limits, ตรวจ agent-id lowercase
+2. เก็บหลักฐาน — อ่านซอร์ส, สร้าง checklist, รันสแกน read-only ใน sandbox เท่านั้น
+3. วิเคราะห์ช่องโหว่ — classify ตาม OWASP Top 10 + trace entry→sink + ให้ severity ตาม mapping ข้างบน
+4. ตรวจ severity/validator — รัน validator .cjs, แยก confirmed vs needs_validation, ตรวจ needs_validation มี blockers+validation_plan
+5. สร้างรายงาน — เขียน findings.json + รายงานภาษาไทย (สรุป, รายการปัญหา, วิธีแก้, ลำดับความสำคัญ) ลง output dir นอก target
+6. ส่ง Review → Manager — save_review ด้วย severity CRITICAL/HIGH/MEDIUM/LOW, กฎ CRITICAL/HIGH ค้าง = NOT DONE ต้องส่งกลับ BUILDING/VERIFYING จนกว่าจะเคลียร์หรือมี approval
+```
+*Manager ไม่รัน audit เอง — ส่งให้ Review Agent ที่โหลดสกิล `cloudflare-security-audit` เท่านั้น*
 
 ## 26.16 Checkpoint Hierarchy (fix.md §2 — P0)
 

@@ -19,3 +19,11 @@ readme.local.md
 
 # Full internal spec — local only; public gets design.github.md instead
 design.md
+
+# Review artifacts — local only (not pushed)
+opencode.json
+scripts/cloudflare-audit-validate.cjs
+scripts/e2e-openvisio.ps1
+scripts/run_completion.py
+fix-v2.md
+sys_review.md

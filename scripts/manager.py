@@ -425,6 +425,7 @@ def save_review(task_id, status, findings=None, reviewer="review"):
     os.makedirs(reviews_dir, exist_ok=True)
     findings = findings or []
     # FIX-10: unified severity CRITICAL/HIGH/MEDIUM/LOW — accept legacy critical/major/minor and map
+    # Legacy mapping — backward compat, deprecate in v0.4 (remove major/minor after migration)
     _legacy_map = {"critical": "CRITICAL", "major": "HIGH", "minor": "MEDIUM", "high": "HIGH", "medium": "MEDIUM", "low": "LOW"}
     normalized = []
     for f in findings:

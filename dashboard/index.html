@@ -18,10 +18,17 @@ th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: 
 .error { background: #fdecea; border: 1px solid #e0a39a; padding: 8px 12px; border-radius: 8px; margin: 8px 0; }
 .muted { color: #666; font-size: 0.85em; }
 @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+@media print { button { display: none !important; } body { margin: 12mm; } .card { break-inside: avoid; } }
 </style>
 </head>
 <body>
-<h1>Agent Dashboard</h1>
+<h1>Scopeboard — Observability Dashboard</h1>
+<div style="position:sticky;top:0;background:#fff;padding:8px 0;z-index:10;display:flex;gap:8px;flex-wrap:wrap;border-bottom:1px solid #eee;margin-bottom:12px">
+  <button onclick="window.print()" style="padding:6px 12px;border:1px solid #0b57d0;border-radius:6px;background:#0b57d0;color:#fff;cursor:pointer">🖨️ Print / Save PDF</button>
+  <button onclick="exportMD()" style="padding:6px 12px;border:1px solid #666;border-radius:6px;background:#fff;cursor:pointer">📄 Export MD</button>
+  <span class="muted" style="align-self:center">or run <code>python scripts/export_report.py --format md|pdf --out reports/report.md</code></span>
+</div>
+<script>function exportMD(){alert('Run: python scripts/export_report.py --format md --out reports/report.md (and --all for combined)')}</script>
 <p class="muted">Static viewer — double-click to open, or run <code>python -m http.server</code> then open <code>dashboard/index.html</code> · Source: <code>dashboard/data.json</code> (built by <code>scripts/export_json.py</code>)</p>
 <div id="load-error" class="error" hidden></div>
 <div id="cdn-warning" class="notice" hidden></div>

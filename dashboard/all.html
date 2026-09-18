@@ -19,10 +19,17 @@ th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: left; font-size: 
 .muted { color: #666; font-size: 0.85em; }
 .skip { color: #a00; }
 @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+@media print { button { display: none !important; } body { margin: 12mm; } .card { break-inside: avoid; } }
 </style>
 </head>
 <body>
-<h1>All Projects Dashboard</h1>
+<h1>Scopeboard — Observability Dashboard (All Projects)</h1>
+<div style="position:sticky;top:0;background:#fff;padding:8px 0;z-index:10;display:flex;gap:8px;flex-wrap:wrap;border-bottom:1px solid #eee;margin-bottom:12px">
+  <button onclick="window.print()" style="padding:6px 12px;border:1px solid #0b57d0;border-radius:6px;background:#0b57d0;color:#fff;cursor:pointer">🖨️ Print / Save PDF</button>
+  <button onclick="exportMDAll()" style="padding:6px 12px;border:1px solid #666;border-radius:6px;background:#fff;cursor:pointer">📄 Export MD</button>
+  <span class="muted" style="align-self:center">or run <code>python scripts/export_report.py --all --format md --out reports/combined.md</code></span>
+</div>
+<script>function exportMDAll(){alert('Run: python scripts/export_report.py --all --format md --out reports/combined.md')}</script>
 <p class="muted">Cross-project view — Source: <code>dashboard/all-projects.json</code> (built by <code>scripts/aggregate.py</code>) · <a href="index.html">Single-project view</a></p>
 <div id="load-error" class="error" hidden></div>
 <div id="cdn-warning" class="notice" hidden></div>

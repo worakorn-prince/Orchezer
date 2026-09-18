@@ -15,6 +15,62 @@ class TestManagerUpgrade(unittest.TestCase):
         os.makedirs(".agent/building", exist_ok=True)
         os.makedirs(DECISIONS_DIR, exist_ok=True)
         os.makedirs(CONTEXT_DIR, exist_ok=True)
+        # FIX-01: isolate destructive tests — backup real queue/state/checkpoint
+        import tempfile, shutil
+        self._tmpdir = tempfile.mkdtemp(prefix="test_upgrade_")
+        # backup real files if exist
+        self._backups = {}
+        import manager as _mgr
+        for key, path in [("queue", _mgr.QUEUE_FILE), ("state", _mgr.STATE_FILE), ("checkpoint", _mgr.CHECKPOINT_FILE)]:
+            if os.path.exists(path):
+                bak = os.path.join(self._tmpdir, os.path.basename(path) + ".bak")
+                shutil.copy2(path, bak)
+                self._backups[key] = (path, bak)
+        # redirect queue/state/checkpoint to tmp files for isolation
+        self._orig_queue = _mgr.QUEUE_FILE
+        self._orig_state = _mgr.STATE_FILE
+        self._orig_checkpoint = _mgr.CHECKPOINT_FILE
+        self._tmp_queue = os.path.join(self._tmpdir, "queue.json")
+        self._tmp_state = os.path.join(self._tmpdir, "state.json")
+        self._tmp_checkpoint = os.path.join(self._tmpdir, "checkpoint.json")
+        _mgr.QUEUE_FILE = self._tmp_queue
+        _mgr.STATE_FILE = self._tmp_state
+        _mgr.CHECKPOINT_FILE = self._tmp_checkpoint
+        # also patch globals in this module
+        global QUEUE_FILE, STATE_FILE, CHECKPOINT_FILE
+        QUEUE_FILE = self._tmp_queue
+        STATE_FILE = self._tmp_state
+        CHECKPOINT_FILE = self._tmp_checkpoint
+        # init tmp files with backups or defaults
+        for key, path in [("queue", self._orig_queue), ("state", self._orig_state), ("checkpoint", self._orig_checkpoint)]:
+            if key in self._backups:
+                shutil.copy2(self._backups[key][1], getattr(self, f"_tmp_{key}"))
+        # also patch ManagerOrchestrator to use tmp files via reload? Instead, ensure new instances read tmp
+        # ensure checkpoint dir exists
+
+    def tearDown(self):
+        import manager as _mgr
+        # restore globals
+        _mgr.QUEUE_FILE = self._orig_queue
+        _mgr.STATE_FILE = self._orig_state
+        _mgr.CHECKPOINT_FILE = self._orig_checkpoint
+        global QUEUE_FILE, STATE_FILE, CHECKPOINT_FILE
+        QUEUE_FILE = self._orig_queue
+        STATE_FILE = self._orig_state
+        CHECKPOINT_FILE = self._orig_checkpoint
+        # restore backups if needed (queue already restored by not overwriting real file, but ensure)
+        import shutil
+        for key, (orig, bak) in self._backups.items():
+            try:
+                shutil.copy2(bak, orig)
+            except Exception:
+                pass
+        # cleanup tmp
+        import shutil as _sh
+        try:
+            _sh.rmtree(self._tmpdir)
+        except Exception:
+            pass
 
     def test_u1_watchdog_detection(self):
         mgr = ManagerOrchestrator(owner="test-runner")

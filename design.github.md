@@ -1,6 +1,6 @@
 # Scopeboard — Viewer Design Notes
 
-Short design doc for the **standalone viewer**. No agent framework, no orchestration —
+Short design doc for the **standalone viewer**. No framework, no orchestration —
 just files in, dashboards out.
 
 ## Concepts
@@ -10,7 +10,7 @@ Project
  └── Task            work unit: TASK-1, TASK-002, ...
       └── Attempt    retry counter: 1, 2, 3, ...
            └── Session        execution session: ses-1, ses-2, ...
-                └── Agent     whoever did the work: any free-form name
+                 └── Source    whoever did the work: any free-form name
                      ├── Tool Calls   one JSON row per call
                      └── Events       lifecycle markers (created/started/done/...)
 ```
@@ -60,7 +60,7 @@ source of truth. Delete any generated file and rebuild it with one command.
 | `risk.py` | tool-calls + checkpoint | session risk levels (observation vs recommendation) |
 | `observability.py` | everything above | `observability.json` contract (schema v1) |
 | `failure.py` | events + tool-calls | 7-category failure taxonomy + recovery stats |
-| `tools_inventory.py` | tool-calls + permission manifests | tool × agent matrix |
+| `tools_inventory.py` | tool-calls + permission manifests | tool × profile matrix |
 | `export_json.py` | all of the above | `dashboard/data.json` (19 sections, single-project view model) |
 | `aggregate.py` | N projects | `dashboard/all-projects.json` (combined view model) |
 | `bootstrap.py` | — | skeleton `.agent/` (+ `--demo` sample data) |
@@ -69,8 +69,8 @@ source of truth. Delete any generated file and rebuild it with one command.
 ## Dashboard views
 
 - `index.html` — single project: KPIs (6 metrics), overview strip, per-task / execution /
-  session / activity / errors / queue / durations / agents / slowest / files / findings /
-  efficiency (+ per-agent) / risk / failure / contract / audit / tools / trend (19 sections)
+   session / activity / errors / queue / durations / profiles / slowest / files / findings /
+   efficiency (+ per-profile) / risk / failure / contract / audit / tools / trend (19 sections)
 - `all.html` — same, merged across projects with a `project` column everywhere
 
 Both are dependency-free static pages (Chart.js via CDN with table fallback when offline).
@@ -88,7 +88,7 @@ Both are dependency-free static pages (Chart.js via CDN with table fallback when
 
 ## Note: v0.3.0-hardened
 
-Hardening makes the Manager survive crashes without changing the viewer contract:
+Dashboard hardening keeps the viewer contract unchanged:
 recovery hierarchy (6 layers: checkpoint → events → state → session → tree → timestamps),
 worker health (5 states: HEALTHY / SLOW / STUCK / DEAD / UNKNOWN), atomic lock separation
 (`manager.lock` lease apart from `state.json`), idempotent operations

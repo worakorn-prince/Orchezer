@@ -459,7 +459,7 @@ def load_task_manifest(task_id):
 
 
 # ---------------------------------------------------------------------------
-# FIX-15: OpenVisio optional provider — Manager Core + Generic Verification
+# FIX-15: Optional verification providers — Manager Core + Generic Verification
 # ---------------------------------------------------------------------------
 class VerificationProvider:
     name = ""
@@ -475,17 +475,6 @@ _VERIFICATION_REGISTRY = {}
 def register_verification_provider(instance):
     _VERIFICATION_REGISTRY[instance.name] = instance
     return instance
-
-
-class OpenVisioVerificationProvider(VerificationProvider):
-    name = "openvisio"
-    def can_verify(self, config=None):
-        import shutil
-        return bool(shutil.which("openvisio") or os.path.exists("D:/npm_global/node_modules/openvisio/dist/cli.js"))
-    def verify(self, task_id, evidence=None, config=None):
-        if self.can_verify(config):
-            return {"status": "pass", "provider": self.name, "detail": "openvisio pass"}
-        return {"status": "unavailable", "provider": self.name, "detail": "openvisio unavailable"}
 
 
 class PytestVerificationProvider(VerificationProvider):
@@ -510,11 +499,10 @@ class NpmVerificationProvider(VerificationProvider):
         return {"status": "fail", "provider": self.name, "detail": "npm fail"}
 
 
-register_verification_provider(OpenVisioVerificationProvider())
 register_verification_provider(PytestVerificationProvider())
 register_verification_provider(NpmVerificationProvider())
 
-_DEFAULT_VERIFICATION_PROVIDER = next((k for k in ("pytest", "openvisio", "npm") if k in _VERIFICATION_REGISTRY), next(iter(_VERIFICATION_REGISTRY)))
+_DEFAULT_VERIFICATION_PROVIDER = next((k for k in ("pytest", "npm") if k in _VERIFICATION_REGISTRY), next(iter(_VERIFICATION_REGISTRY)))
 
 
 def get_verification_provider():

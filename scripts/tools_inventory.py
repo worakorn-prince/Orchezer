@@ -29,14 +29,6 @@ TOOL_CATALOG = [
     ("memory_save_lesson", "memory", "บันทึกบทเรียน (memory-mcp)"),
     ("memory_get_profile", "memory", "โปรไฟล์ผู้ใช้ย่อ (memory-mcp)"),
     ("memory_search_history", "memory", "ค้น prompt เก่า (memory-mcp)"),
-    ("openvisio_resolve_context", "graph", "โครงรีโปพร้อมอันดับงาน (openvisio)"),
-    ("openvisio_search_code", "graph", "ค้นโค้ด indexed (openvisio)"),
-    ("openvisio_find_symbol", "graph", "หาสัญลักษณ์ตามชื่อ/ภาษาธรรมชาติ (openvisio)"),
-    ("openvisio_trace_calls", "graph", "ไล่ call graph (openvisio)"),
-    ("openvisio_get_dependents", "graph", "วิเคราะห์ import impact (openvisio)"),
-    ("openvisio_get_neighborhood", "graph", "ซับกราฟรอบไฟล์ (openvisio)"),
-    ("openvisio_get_hotspots", "graph", "ไฟล์เสี่ยง/สำคัญ (openvisio)"),
-    ("openvisio_get_repo_skeleton", "graph", "แผนที่รีโปทั้งชุด (openvisio)"),
 ]
 CATALOG_ORDER = {name: i for i, (name, _, _) in enumerate(TOOL_CATALOG)}
 CATALOG_DESC = {name: (cat, desc) for name, cat, desc in TOOL_CATALOG}
@@ -52,8 +44,6 @@ def categorize(name):
         return CATALOG_DESC[key][0]
     if key.startswith("memory_"):
         return "memory"
-    if key.startswith("openvisio_"):
-        return "graph"
     return "observed"
 
 

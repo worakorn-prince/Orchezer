@@ -279,7 +279,7 @@ class IsolatedManagerTest(unittest.TestCase):
         orig_cfg = mgr_mod.CONFIG_FILE
         # use tmp config
         tmp_cfg = os.path.join(self.tmpdir, "config.json")
-        save_json(tmp_cfg, {"verification": {"enabled": False, "provider": "openvisio"}})
+        save_json(tmp_cfg, {"verification": {"enabled": False, "provider": "pytest"}})
         old_cfg_file = mgr_mod.CONFIG_FILE
         mgr_mod.CONFIG_FILE = tmp_cfg
         try:
@@ -1126,7 +1126,7 @@ class IsolatedManagerTest(unittest.TestCase):
     def test_FIXV221_core_has_no_provider_literals(self):
         import inspect as _inspect
         src = (_inspect.getsource(mgr_mod.verify_with_provider) + _inspect.getsource(mgr_mod.get_verification_provider)).lower()
-        for w in ["openvisio", "pytest", "npm", "which", "subprocess"]:
+        for w in ["pytest", "npm", "which", "subprocess"]:
             self.assertNotIn(w, src)
 
     def test_FIXV227_p0_green_proceeds(self):

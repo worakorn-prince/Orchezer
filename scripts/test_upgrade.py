@@ -36,6 +36,10 @@ class TestManagerUpgrade(unittest.TestCase):
         _mgr.QUEUE_FILE = self._tmp_queue
         _mgr.STATE_FILE = self._tmp_state
         _mgr.CHECKPOINT_FILE = self._tmp_checkpoint
+        # FIX-V2-06: isolate lock file — never touch real .agent/manager/manager.lock
+        self._orig_lock = _mgr.LOCK_FILE
+        self._tmp_lock = os.path.join(self._tmpdir, "manager.lock")
+        _mgr.LOCK_FILE = self._tmp_lock
         # also patch globals in this module
         global QUEUE_FILE, STATE_FILE, CHECKPOINT_FILE
         QUEUE_FILE = self._tmp_queue
@@ -45,6 +49,9 @@ class TestManagerUpgrade(unittest.TestCase):
         for key, path in [("queue", self._orig_queue), ("state", self._orig_state), ("checkpoint", self._orig_checkpoint)]:
             if key in self._backups:
                 shutil.copy2(self._backups[key][1], getattr(self, f"_tmp_{key}"))
+        tmp_st = load_json(self._tmp_state, {}) or {}
+        tmp_st["p0_last_result"] = {"passed": True, "at": datetime.now(timezone.utc).isoformat()}
+        save_json(self._tmp_state, tmp_st)
         # also patch ManagerOrchestrator to use tmp files via reload? Instead, ensure new instances read tmp
         # ensure checkpoint dir exists
 
@@ -54,6 +61,7 @@ class TestManagerUpgrade(unittest.TestCase):
         _mgr.QUEUE_FILE = self._orig_queue
         _mgr.STATE_FILE = self._orig_state
         _mgr.CHECKPOINT_FILE = self._orig_checkpoint
+        _mgr.LOCK_FILE = self._orig_lock
         global QUEUE_FILE, STATE_FILE, CHECKPOINT_FILE
         QUEUE_FILE = self._orig_queue
         STATE_FILE = self._orig_state
@@ -86,6 +94,7 @@ class TestManagerUpgrade(unittest.TestCase):
 
     def test_u2_idempotent_recovery(self):
         mgr = ManagerOrchestrator(owner="test-runner")
+        mgr.acquire_lock()
         initial_attempt = mgr.state.get("attempt", 1)
         save_json(CHECKPOINT_FILE, {
             "task_id": "TEST-TASK-001",
@@ -94,7 +103,7 @@ class TestManagerUpgrade(unittest.TestCase):
             "remaining": ["api integration"],
             "next_action": "implement api endpoint"
         })
-        mgr.execute_recovery("TEST-TASK-001")
+        mgr.execute_recovery("TEST-TASK-001", classification="LIMIT")
         self.assertEqual(mgr.state.get("phase"), "recovering")
         self.assertEqual(mgr.state.get("attempt"), initial_attempt + 1)
         ctx_file = os.path.join(CONTEXT_DIR, "TEST-TASK-001.resume.md")
@@ -124,6 +133,7 @@ class TestManagerUpgrade(unittest.TestCase):
 
     def test_u5_policy_and_approval(self):
         mgr = ManagerOrchestrator(owner="test-runner")
+        mgr.acquire_lock()
         # Check high risk approval gate
         is_required = mgr.check_approval_required("TEST-HIGH-RISK", risk_level="HIGH")
         self.assertTrue(is_required)
@@ -151,6 +161,28 @@ class TestManagerUpgrade(unittest.TestCase):
         with open(dec_file, "r", encoding="utf-8") as f:
             text = f.read()
         self.assertIn("Routing decision", text)
+
+    def test_u8a_approval_blocked_without_impact(self):
+        mgr = ManagerOrchestrator(owner="test-runner")
+        mgr.acquire_lock()
+        res = mgr.request_approval("FIX-V2-18-NO-IMPACT")
+        self.assertEqual(res.get("status"), "BLOCKED")
+
+    def test_u8b_approval_blocked_without_review(self):
+        mgr = ManagerOrchestrator(owner="test-runner")
+        mgr.acquire_lock()
+        mgr.record_impact("FIX-V2-18-NO-REVIEW", "impact summary")
+        res = mgr.request_approval("FIX-V2-18-NO-REVIEW")
+        self.assertEqual(res.get("status"), "BLOCKED")
+
+    def test_u8c_approval_granted_full_order(self):
+        mgr = ManagerOrchestrator(owner="test-runner")
+        mgr.acquire_lock()
+        mgr.record_impact("FIX-V2-18-FULL", "impact summary")
+        mgr.require_design_review("FIX-V2-18-FULL")
+        res = mgr.request_approval("FIX-V2-18-FULL")
+        self.assertNotEqual(res.get("status"), "BLOCKED")
+        self.assertEqual(res.get("status"), "APPROVED")
 
 if __name__ == "__main__":
     unittest.main()

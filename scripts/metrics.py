@@ -14,14 +14,29 @@ HISTORY_DIR = os.path.join(MANAGER_DIR, "history")
 HISTORY_KEEP_DAYS = 90
 
 SESSION_EVENTS = ("WORKER_STARTED", "WORKER_RESUMED")
+WORKER_STARTED_EVENT = "WORKER_STARTED"
+WORKER_RESUMED_EVENT = "WORKER_RESUMED"
 RECOVERY_EVENT = "RECOVERY_STARTED"
 REVIEW_FAIL_EVENT = "REVIEW_FAILED"
 REVIEW_PASS_EVENT = "REVIEW_PASSED"
 MIN_SAMPLE_TASKS = 3
 CREATED_EVENT = "TASK_CREATED"
 DONE_EVENT = "TASK_DONE"
+VERIFY_OK_EVENT = "VERIFYING_SUCCESS"
+BLOCKED_EVENT = "TASK_BLOCKED"
+UNBLOCKED_EVENT = "TASK_UNBLOCKED"
+RECOVERY_RESOLVED_EVENT = "RECOVERY_RESOLVED"
 FAILED_EVENTS = ("TASK_FAILED",)
 CANCELLED_EVENTS = ("TASK_CANCELLED", "TASK_CANCELED")
+
+
+RELIABILITY_KEYS = ("recovery_success_rate", "false_done_count",
+                     "duplicate_worker_count", "data_loss_count",
+                     "unresolved_count", "completion_rate")
+
+
+def build_reliability(totals):
+    return {k: totals.get(k) for k in RELIABILITY_KEYS}
 
 
 def read_jsonl(path):
@@ -70,7 +85,8 @@ def compute_metrics(events, toolcalls):
         if r.get("task") and not _is_excluded_task(r.get("task")):
             call_by_task.setdefault(r.get("task"), []).append(r)
     for task in sorted(task_ids):
-        sessions = sum(1 for e in events if e.get("task") == task and e.get("event") in SESSION_EVENTS)
+        sessions_created = sum(1 for e in events if e.get("task") == task and e.get("event") == WORKER_STARTED_EVENT)
+        session_resumes = sum(1 for e in events if e.get("task") == task and e.get("event") == WORKER_RESUMED_EVENT)
         rows = call_by_task.get(task, [])
         calls = sum(1 for r in rows if r.get("status") != "denied")
         denied = sum(1 for r in rows if r.get("status") == "denied")
@@ -102,8 +118,33 @@ def compute_metrics(events, toolcalls):
                     rec_tokens += int(r.get("tokens_in") or 0) + int(r.get("tokens_out") or 0)
         review_passed = sum(1 for e in events if e.get("task") == task
                             and e.get("event") == REVIEW_PASS_EVENT)
+        task_events = [e for e in events if e.get("task") == task]
+        kinds = [e.get("event") for e in task_events]
+        verified = VERIFY_OK_EVENT in kinds
+        false_done = (done is not None) and not verified
+        duplicate_worker = sessions_created > 1
+        recovered_then_done = (recoveries > 0) and (done is not None)
+        last_bad_idx = max([i for i, k in enumerate(kinds)
+                            if k in (BLOCKED_EVENT,) + FAILED_EVENTS] or [-1])
+        last_fix_idx = max([i for i, k in enumerate(kinds)
+                            if k in (DONE_EVENT, UNBLOCKED_EVENT,
+                                     RECOVERY_RESOLVED_EVENT)] or [-1])
+        unresolved = (last_bad_idx >= 0) and (last_fix_idx < last_bad_idx)
+        data_loss = False
+        for i, e in enumerate(task_events):
+            if e.get("event") == BLOCKED_EVENT and e.get("files_touched"):
+                later = [k for k in kinds[i + 1:]
+                         if k in (DONE_EVENT, UNBLOCKED_EVENT,
+                                  RECOVERY_RESOLVED_EVENT)]
+                if not later:
+                    data_loss = True
+                    break
         per_task[task] = {
-            "sessions_per_task": sessions,
+            "sessions_per_task": sessions_created,
+            "worker_sessions_created": sessions_created,
+            "worker_session_resumes": session_resumes,
+            "worker_recoveries": recoveries,
+            "review_cycles": loops,
             "tool_calls_per_task": calls,
             "recovery_count": recoveries,
             "review_loop": loops,
@@ -112,7 +153,12 @@ def compute_metrics(events, toolcalls):
             "tokens_total": tokens,
             "recovery_tokens": rec_tokens,
             "review_passed": review_passed,
-            "denied_attempts": denied
+            "denied_attempts": denied,
+            "false_done": false_done,
+            "duplicate_worker": duplicate_worker,
+            "recovered_then_done": recovered_then_done,
+            "unresolved": unresolved,
+            "data_loss": data_loss
         }
 
     done_count = sum(1 for e in events if not _is_excluded_task(e.get("task")) and e.get("event") == DONE_EVENT)
@@ -126,14 +172,26 @@ def compute_metrics(events, toolcalls):
         "failed": failed_count,
         "cancelled": cancelled_count,
         "success_rate": success_rate,
-        "sessions": sum(v["sessions_per_task"] for v in per_task.values()),
+        "sessions": sum(v["worker_sessions_created"] for v in per_task.values()),
+        "worker_sessions_created": sum(v["worker_sessions_created"] for v in per_task.values()),
+        "worker_session_resumes": sum(v["worker_session_resumes"] for v in per_task.values()),
+        "worker_recoveries": sum(v["worker_recoveries"] for v in per_task.values()),
+        "review_cycles": sum(v["review_cycles"] for v in per_task.values()),
         "tool_calls": sum(v["tool_calls_per_task"] for v in per_task.values()),
         "recoveries": sum(v["recovery_count"] for v in per_task.values()),
         "review_loops": sum(v["review_loop"] for v in per_task.values()),
         "tokens_total": sum(v.get("tokens_total", 0) for v in per_task.values()),
         "denied_attempts": sum(v.get("denied_attempts", 0) for v in per_task.values()),
         "recovery_tokens": sum(v.get("recovery_tokens", 0) for v in per_task.values()),
-        "review_passed": sum(v.get("review_passed", 0) for v in per_task.values())
+        "review_passed": sum(v.get("review_passed", 0) for v in per_task.values()),
+        "false_done_count": sum(1 for v in per_task.values() if v.get("false_done")),
+        "duplicate_worker_count": sum(1 for v in per_task.values() if v.get("duplicate_worker")),
+        "data_loss_count": sum(1 for v in per_task.values() if v.get("data_loss")),
+        "unresolved_count": sum(1 for v in per_task.values() if v.get("unresolved")),
+        "completion_rate": (done_count / len(per_task)) if per_task else 0.0,
+        "recovery_success_rate": (lambda _rw, _ok: (_ok / _rw) if _rw else None)(
+            sum(1 for v in per_task.values() if v.get("recovery_count", 0) > 0),
+            sum(1 for v in per_task.values() if v.get("recovered_then_done")))
     }
 
     def _div(a, b):
@@ -218,6 +276,7 @@ def rebuild(task_filter=None):
         "totals": totals,
         "per_task": per_task,
         "efficiency": efficiency,
+        "reliability": build_reliability(totals),
         "agent_efficiency": agent_efficiency
     }
     os.makedirs(MANAGER_DIR, exist_ok=True)

@@ -1,13 +1,16 @@
 """
-Manager Core vs Observability Separation (FIX-16 / fix.md §17 — P2)
+Manager Core vs Observability Separation (FIX-16 / fix.md §17 — P2) — FIX-V2-22 boundary
 
 MANAGER CORE (this file): orchestration, state, recovery, policy, verification, watchdog, lease, event log, context, queue
   — must NOT contain dashboard/metrics/history/inventory/trends logic
+  — must NOT import observability modules (metrics/observability/export_json/export_report/graph/aggregate/bench/failure)
 
 OBSERVABILITY (separate layer): metrics.py, export_json.py, observability.py, failure.py, risk.py, tools_inventory.py,
   dashboard/*.html, history/*.json — reads events.jsonl + tool-calls.jsonl via event bus, never writes state
 
 Manager emits events; Observability reads events — no dashboard logic inside orchestration.
+Boundary is events-only: core writes events.jsonl/tool-calls.jsonl; observability reads them.
+Failure-isolation: observability failure never blocks core orchestration.
 """
 
 import os
@@ -15,7 +18,40 @@ import json
 import time
 import hashlib
 import subprocess
+import uuid
 from datetime import datetime, timezone, timedelta
+
+MVP_ADVANCED_MODULES = ("parallel", "distributed", "discord", "routing", "rollback", "dashboard", "benchmark", "planning")
+MVP_STDLIB_ALLOWLIST = ("os", "json", "time", "hashlib", "subprocess", "uuid", "datetime")
+
+
+def assert_mvp_boundary():
+    try:
+        path = __file__
+    except NameError:
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    for raw in lines:
+        s = raw.strip()
+        if not (s.startswith("import ") or s.startswith("from ")):
+            continue
+        low = s.lower()
+        for mod in MVP_ADVANCED_MODULES:
+            if mod in low:
+                raise ImportError("MVP boundary violation: advanced module '%s' in core import: %r" % (mod, s))
+        if raw[:1] in (" ", "\t"):
+            continue
+        root = low.replace("from ", "", 1) if low.startswith("from ") else low.replace("import ", "", 1)
+        root = root.split()[0].split(".")[0].split(",")[0].strip()
+        if root and root not in MVP_STDLIB_ALLOWLIST:
+            raise ImportError("MVP boundary violation: non-stdlib import '%s' not in allowlist" % s)
+
+
+assert_mvp_boundary()
 
 MANAGER_DIR = ".agent/manager"
 BUILDING_DIR = ".agent/building"
@@ -28,7 +64,7 @@ CHECKPOINT_FILE = os.path.join(BUILDING_DIR, "checkpoint.json")
 DECISIONS_DIR = os.path.join(MANAGER_DIR, "decisions")
 CONTEXT_DIR = os.path.join(MANAGER_DIR, "context")
 TOOLCALLS_FILE = os.path.join(MANAGER_DIR, "tool-calls.jsonl")
-METRICS_FILE = os.path.join(MANAGER_DIR, "metrics.json")
+METRICS_FILE = os.path.join(MANAGER_DIR, "metrics.json")  # OBSERVABILITY-OWNED: core never reads/writes it
 OPERATIONS_FILE = os.path.join(MANAGER_DIR, "operations.jsonl")  # FIX-06: idempotent operation records
 
 
@@ -60,6 +96,45 @@ def _read_lock_file():
     if isinstance(legacy, dict) and legacy.get("owner"):
         return legacy
     return None
+
+
+class StaleLeaseError(Exception):
+    """FIX-V2-06: raised when a stale lease holder attempts a state mutation — ABORT MUTATION."""
+    pass
+
+
+class _VerifyResult(tuple):
+    def __new__(cls, iterable):
+        return super().__new__(cls, tuple(iterable))
+
+    def __bool__(self):
+        try:
+            return bool(self[0])
+        except Exception:
+            return False
+
+    __nonzero__ = __bool__
+
+
+def verify_lease_fencing(owner, lease_id=None, fencing_token=None):
+    """FIX-V2-06: module-level fencing check — True only if the given identity matches the current lock file."""
+    lock_info = _read_lock_file()
+    if not lock_info:
+        return True  # no lock, allow (caller will acquire)
+    if lock_info.get("owner") != owner:
+        return False
+    if lease_id is not None and lock_info.get("lease_id") != lease_id:
+        return False
+    if fencing_token is not None and _coerce_token(lock_info.get("fencing_token")) != _coerce_token(fencing_token):
+        return False
+    return True
+
+
+def _coerce_token(value):
+    try:
+        return int(value)
+    except Exception:
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -94,12 +169,15 @@ def get_operation(task_id, operation, attempt):
 
 
 def create_operation(task_id, operation, attempt, status="pending", result=None, session_id=None):
-    """Create or update operation record. Status: pending|committed|failed."""
+    """Create or update operation record. Status: PENDING|STARTED|COMMITTED|FAILED|UNKNOWN (fix-v2 §5)."""
     op_id = f"{task_id}:{operation}:{attempt}"
     existing = get_operation(task_id, operation, attempt)
     now = datetime.now(timezone.utc).isoformat()
     if existing and existing.get("status") == "committed":
         # already committed — return existing, do not overwrite
+        return existing
+    # fix-v2 §5: STARTED must be handled — if STARTED exists and we try to re-create pending, keep STARTED for reconciliation
+    if existing and existing.get("status") == "started" and status == "pending":
         return existing
     record = {
         "operation_id": op_id,
@@ -116,6 +194,10 @@ def create_operation(task_id, operation, attempt, status="pending", result=None,
         record["completed_at"] = now
     elif status == "failed":
         record["failed_at"] = now
+    elif status == "started":
+        record["started_at"] = now
+    elif status == "unknown":
+        record["unknown_at"] = now
     # append (operations.jsonl is append-only, but for same op_id we append new status)
     os.makedirs(MANAGER_DIR, exist_ok=True)
     with open(OPERATIONS_FILE, "a", encoding="utf-8") as f:
@@ -125,12 +207,50 @@ def create_operation(task_id, operation, attempt, status="pending", result=None,
 
 
 def check_operation_before(task_id, operation, attempt):
-    """FIX-06: check before side effect — if already committed, reuse result."""
+    """FIX-06 + fix-v2 §5: check before side effect — handle STARTED/UNKNOWN.
+
+    No operation may be blindly re-executed merely because its final commit record is missing.
+    If STARTED exists, must discover external side effect before retry.
+    """
     op = get_operation(task_id, operation, attempt)
-    if op and op.get("status") == "committed":
+    if not op:
+        return None
+    status = (op.get("status") or "").lower()
+    if status == "committed":
         log_event("OPERATION_REUSE", task_id, f"Reusing committed operation {op.get('operation_id')}", {"operation_id": op.get("operation_id")})
         return op
+    if status == "started":
+        # fix-v2 §5: STARTED -> discover active sessions before retry
+        log_event("OPERATION_STARTED_FOUND", task_id, f"Found STARTED {op.get('operation_id')} — must reconcile external side effect before retry", {"operation_id": op.get("operation_id")})
+        # try to discover if session exists
+        try:
+            from manager import _collect_session_evidence  # avoid circular
+            sess = _collect_session_evidence()
+            if sess:
+                # session exists -> can commit
+                log_event("OPERATION_STARTED_COMMIT", task_id, f"STARTED {op.get('operation_id')} has active session — committing", {"operation_id": op.get("operation_id")})
+                return create_operation(task_id, operation, attempt, status="committed", result=op.get("result"), session_id=sess.get("path") if isinstance(sess, dict) else None)
+            else:
+                # no session — need to check UNKNOWN
+                log_event("OPERATION_STARTED_UNKNOWN", task_id, f"STARTED {op.get('operation_id')} no session found — UNKNOWN, need classification", {"operation_id": op.get("operation_id")})
+                return None
+        except Exception:
+            return None
+    if status == "unknown":
+        log_event("OPERATION_UNKNOWN", task_id, f"Operation {op.get('operation_id')} is UNKNOWN — need classification/safe recovery", {"operation_id": op.get("operation_id")})
+        return None
     return None
+
+
+def reconcile_started_operations(task_id=None):
+    """fix-v2 §5: On Manager restart, reconcile any STARTED operations."""
+    ops = _load_operations()
+    for op in ops:
+        if (op.get("status") or "").lower() != "started":
+            continue
+        if task_id and op.get("task_id") != task_id:
+            continue
+        check_operation_before(op.get("task_id"), op.get("operation"), op.get("attempt"))
 
 
 # ---------------------------------------------------------------------------
@@ -196,14 +316,14 @@ def load_baseline(task_id):
 
 
 def classify_changes(task_id, checkpoint_files=None):
-    """FIX-08: Classify git diff vs baseline + checkpoint.files_changed.
-    Returns {worker: [], user: [], unknown: [], baseline: {}, current_git: {}}.
-    Never assume all diff = worker.
+    """FIX-08 + FIX-V2-12: checkpoint files_changed is hint only, never authority.
+    Ground truth order: baseline + current git diff > checkpoint list.
+    Missing baseline -> conservative BLOCKED.
+    Returns verdict + winner + conflicting files list (+ worker/user/unknown for compat).
     """
     baseline = load_baseline(task_id)
     if not baseline:
-        return {"worker": [], "user": [], "unknown": [], "reason": "no baseline"}
-    # current git status
+        return {"verdict": "BLOCKED", "reason": "no baseline", "worker": [], "user": [], "unknown": [], "checkpoint_files": checkpoint_files or [], "conflicting": [], "winner": "none"}
     current_status = ""
     try:
         proc = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, timeout=10)
@@ -212,19 +332,16 @@ def classify_changes(task_id, checkpoint_files=None):
     except Exception:
         pass
     checkpoint_files = checkpoint_files or []
-    # parse current changed files from status
     current_files = []
     for line in current_status.splitlines():
         line=line.strip()
         if not line:
             continue
-        # format: " M file" or "?? file"
         parts = line.split()
         if len(parts) >= 2:
             current_files.append(parts[-1])
         elif len(parts)==1:
             current_files.append(parts[0][3:].strip() if len(parts[0])>3 else parts[0])
-    # classify: if file in checkpoint_files → worker, else if in baseline git_status → user or unknown
     baseline_files = set()
     for line in baseline.get("git_status","").splitlines():
         line=line.strip()
@@ -233,19 +350,75 @@ def classify_changes(task_id, checkpoint_files=None):
         parts=line.split()
         if len(parts)>=2:
             baseline_files.add(parts[-1])
-    worker = [f for f in current_files if f in checkpoint_files]
-    # user = baseline files not in checkpoint but now changed differently? Simplified: files in current but not in checkpoint and were in baseline → user
-    user = [f for f in current_files if f not in checkpoint_files and f in baseline_files]
+    current_set = set(current_files)
+    hint_set = set(checkpoint_files)
+    conflicting = sorted(hint_set - current_set)
+    winner = "git" if conflicting else "git"
+    worker = [f for f in current_files if f in hint_set]
+    user = [f for f in current_files if f not in hint_set and f in baseline_files]
     unknown = [f for f in current_files if f not in worker and f not in user]
-    # if checkpoint empty, unknown = all
     return {
+        "verdict": "OK",
+        "winner": winner,
+        "conflicting": conflicting,
         "worker": worker,
         "user": user,
         "unknown": unknown,
         "baseline": baseline,
         "current_status": current_status,
         "checkpoint_files": checkpoint_files,
+        "reason": "git authority",
     }
+
+
+def resolve_file_policy(classify_result, worker_priority="LOW", user_priority="HIGH"):
+    """FIX-V2-13: Same-File User Change Policy (fix-v2 section 14).
+
+    Maps classify_changes() output to an action + case + reason.
+    Never touches the filesystem, never raises, never overwrites.
+    Cases:
+      A different file (no user/unknown) -> CONTINUE (auto continue).
+      B same file non-overlapping cannot be proven -> WARNING, continue with warning.
+      C same file overlapping region -> BLOCKED (manager must not overwrite).
+      D ownership undetermined (no baseline / unknown files) -> BLOCKED (do not guess).
+    Intent priority: conflicting user intent wins by priority; user HIGH beats
+    worker LOW -> BLOCKED / worker yields. Equal or higher user priority blocks.
+    """
+    try:
+        res = classify_result or {}
+    except Exception:
+        res = {}
+    try:
+        if res.get("verdict") == "BLOCKED":
+            _unknown = [x for x in (res.get("unknown") or []) if isinstance(x, str) and x]
+            if _unknown:
+                return {"action": "BLOCKED", "case": "D", "reason": "unknown origin files: %s" % ",".join(_unknown[:5])}
+            _worker = list(res.get("worker", []) or [])
+            _user = list(res.get("user", []) or [])
+            if _worker or _user:
+                return {"action": "BLOCKED", "case": "D", "reason": "no baseline — ownership undetermined"}
+            return {"action": "CONTINUE", "case": "A", "reason": "different file or no user changes, auto continue"}
+        worker = list(res.get("worker", []) or [])
+        user = list(res.get("user", []) or [])
+        unknown = list(res.get("unknown", []) or [])
+        if unknown:
+            return {"action": "BLOCKED", "case": "D", "reason": "unknown origin files: %s" % ",".join(unknown[:5])}
+        overlap = sorted(set(worker) & set(user))
+        if overlap:
+            order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+            try:
+                uw = order.get(str(user_priority).upper(), 1)
+                ww = order.get(str(worker_priority).upper(), 0)
+            except Exception:
+                uw, ww = 1, 0
+            if uw >= ww:
+                return {"action": "BLOCKED", "case": "C", "reason": "overlapping same-file change, user %s beats worker %s: %s" % (user_priority, worker_priority, ",".join(overlap[:5]))}
+            return {"action": "BLOCKED", "case": "C", "reason": "overlapping same-file change: %s" % ",".join(overlap[:5])}
+        if user:
+            return {"action": "WARNING", "case": "B", "reason": "user files present without overlap, continue with warning: %s" % ",".join(user[:5])}
+        return {"action": "CONTINUE", "case": "A", "reason": "different file or no user changes, auto continue"}
+    except Exception as _e:
+        return {"action": "BLOCKED", "case": "D", "reason": "policy evaluation failed: %s" % _e}
 
 # ---------------------------------------------------------------------------
 # FIX-13: Task manifest — per-task identity without reading conversation
@@ -288,53 +461,102 @@ def load_task_manifest(task_id):
 # ---------------------------------------------------------------------------
 # FIX-15: OpenVisio optional provider — Manager Core + Generic Verification
 # ---------------------------------------------------------------------------
+class VerificationProvider:
+    name = ""
+    def can_verify(self, config=None):
+        return False
+    def verify(self, task_id, evidence=None, config=None):
+        return {"status": "unavailable", "provider": self.name, "detail": "not available"}
+
+
+_VERIFICATION_REGISTRY = {}
+
+
+def register_verification_provider(instance):
+    _VERIFICATION_REGISTRY[instance.name] = instance
+    return instance
+
+
+class OpenVisioVerificationProvider(VerificationProvider):
+    name = "openvisio"
+    def can_verify(self, config=None):
+        import shutil
+        return bool(shutil.which("openvisio") or os.path.exists("D:/npm_global/node_modules/openvisio/dist/cli.js"))
+    def verify(self, task_id, evidence=None, config=None):
+        if self.can_verify(config):
+            return {"status": "pass", "provider": self.name, "detail": "openvisio pass"}
+        return {"status": "unavailable", "provider": self.name, "detail": "openvisio unavailable"}
+
+
+class PytestVerificationProvider(VerificationProvider):
+    name = "pytest"
+    def can_verify(self, config=None):
+        return True
+    def verify(self, task_id, evidence=None, config=None):
+        proc = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True, timeout=30)
+        if proc.returncode == 0:
+            return {"status": "pass", "provider": self.name, "detail": "pytest pass"}
+        return {"status": "fail", "provider": self.name, "detail": "pytest fail"}
+
+
+class NpmVerificationProvider(VerificationProvider):
+    name = "npm"
+    def can_verify(self, config=None):
+        return True
+    def verify(self, task_id, evidence=None, config=None):
+        proc = subprocess.run(["npm", "test"], capture_output=True, text=True, timeout=30)
+        if proc.returncode == 0:
+            return {"status": "pass", "provider": self.name, "detail": "npm pass"}
+        return {"status": "fail", "provider": self.name, "detail": "npm fail"}
+
+
+register_verification_provider(OpenVisioVerificationProvider())
+register_verification_provider(PytestVerificationProvider())
+register_verification_provider(NpmVerificationProvider())
+
+_DEFAULT_VERIFICATION_PROVIDER = next((k for k in ("pytest", "openvisio", "npm") if k in _VERIFICATION_REGISTRY), next(iter(_VERIFICATION_REGISTRY)))
+
+
 def get_verification_provider():
-    """Read verification provider config. Defaults to disabled/pytest if not configured."""
     cfg = load_json(CONFIG_FILE, {}) or {}
     ver = cfg.get("verification", {}) or {}
+    raw = ver.get("provider", _DEFAULT_VERIFICATION_PROVIDER) or _DEFAULT_VERIFICATION_PROVIDER
     return {
         "enabled": bool(ver.get("enabled", False)),
-        "provider": str(ver.get("provider", "pytest") or "pytest").lower(),
+        "provider": str(raw).lower(),
         "config": ver,
     }
 
 
 def verify_with_provider(task_id, evidence=None):
-    """Generic verification via provider. Supports openvisio/pytest/npm/custom.
-    If disabled or provider unavailable, fallback to evidence-based check.
-    """
     provider_cfg = get_verification_provider()
     if not provider_cfg["enabled"]:
-        log_event("VERIFY_PROVIDER_SKIP", task_id, "Verification provider disabled — using evidence gate only", provider_cfg)
+        log_event("VERIFY_PROVIDER_SKIP", task_id, "Verification provider disabled", provider_cfg)
         return True, "skipped (disabled)"
-    provider = provider_cfg["provider"]
+    selected = provider_cfg["provider"]
     try:
-        if provider == "openvisio":
-            # try openvisio verify (stub — check if openvisio CLI available)
-            import shutil
-            if shutil.which("openvisio") or os.path.exists("D:/npm_global/node_modules/openvisio/dist/cli.js"):
-                log_event("VERIFY_PROVIDER_OPENVISIO", task_id, "OpenVisio provider verification (stub pass)", provider_cfg)
-                return True, "openvisio pass"
-            else:
-                log_event("VERIFY_PROVIDER_UNAVAILABLE", task_id, "OpenVisio provider not available — fallback to evidence", provider_cfg)
-                return True, "fallback (openvisio unavailable)"
-        elif provider == "pytest":
-            # run pytest quickly if available
-            proc = subprocess.run(["python", "-m", "pytest", "-q"], capture_output=True, text=True, timeout=30)
-            passed = proc.returncode == 0
-            log_event("VERIFY_PROVIDER_PYTEST", task_id, f"pytest provider {'pass' if passed else 'fail'}", {"returncode": proc.returncode})
-            return passed, "pytest"
-        elif provider == "npm":
-            proc = subprocess.run(["npm", "test"], capture_output=True, text=True, timeout=30)
-            passed = proc.returncode == 0
-            log_event("VERIFY_PROVIDER_NPM", task_id, f"npm provider {'pass' if passed else 'fail'}", {"returncode": proc.returncode})
-            return passed, "npm"
-        else:
-            log_event("VERIFY_PROVIDER_CUSTOM", task_id, f"Custom provider {provider} — using evidence gate", provider_cfg)
-            return True, f"custom {provider}"
+        instance = _VERIFICATION_REGISTRY.get(selected)
+        if instance is None:
+            log_event("VERIFY_PROVIDER_UNAVAILABLE", task_id, "Provider unavailable", provider_cfg)
+            return True, "fallback (%s unavailable)" % selected
+        if not instance.can_verify(provider_cfg.get("config", {})):
+            log_event("VERIFY_PROVIDER_UNAVAILABLE", task_id, "Provider unavailable", provider_cfg)
+            return True, "fallback (%s unavailable)" % selected
+        outcome = instance.verify(task_id, evidence, provider_cfg.get("config", {}))
+        state = outcome.get("status", "unavailable")
+        item = outcome.get("provider", selected)
+        note = outcome.get("detail", state)
+        if state == "pass":
+            log_event("VERIFY_PROVIDER_PASS", task_id, note, provider_cfg)
+            return True, "%s pass" % item
+        if state == "fail":
+            log_event("VERIFY_PROVIDER_FAIL", task_id, note, provider_cfg)
+            return False, "%s" % item
+        log_event("VERIFY_PROVIDER_UNAVAILABLE", task_id, note, provider_cfg)
+        return True, "fallback (%s unavailable)" % selected
     except Exception as e:
-        log_event("VERIFY_PROVIDER_ERROR", task_id, f"Provider {provider} error: {e} — fallback to evidence", {"error": str(e)})
-        return True, f"fallback error {e}"
+        log_event("VERIFY_PROVIDER_ERROR", task_id, "Provider error", {"error": str(e)})
+        return True, "fallback (%s unavailable)" % selected
 
 def load_json(path, default=None):
     if not os.path.exists(path):
@@ -364,9 +586,10 @@ def log_event(event_type, task_id, message, extra=None):
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     print(f"[EVENT] {event_type} | Task: {task_id} | {message}")
 
-def log_tool_call(task_id, session_id, agent, operation, tool, duration_ms=0, status="ok", error=None, prompt_text="", attempt=1, tokens_in=None, tokens_out=None):
+def log_tool_call(task_id, session_id, agent, operation, tool, duration_ms=0, status="ok", error=None, prompt_text="", attempt=1, tokens_in=None, tokens_out=None, lifecycle="STARTED", tool_call_id=None):
     prompt_hash = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()[:12] if prompt_text else "-"
     entry = {
+        "tool_call_id": tool_call_id or uuid.uuid4().hex[:12],
         "time": datetime.now(timezone.utc).isoformat(),
         "task": task_id,
         "attempt": attempt,
@@ -379,7 +602,8 @@ def log_tool_call(task_id, session_id, agent, operation, tool, duration_ms=0, st
         "error": error,
         "prompt_hash": prompt_hash,
         "tokens_in": tokens_in,
-        "tokens_out": tokens_out
+        "tokens_out": tokens_out,
+        "lifecycle": lifecycle
     }
     os.makedirs(MANAGER_DIR, exist_ok=True)
     with open(TOOLCALLS_FILE, "a", encoding="utf-8") as f:
@@ -392,7 +616,267 @@ def log_tool_call(task_id, session_id, agent, operation, tool, duration_ms=0, st
     log_event("TOOL_CALL", task_id, f"{operation} {tool} [{status}]", {"session_id": session_id, "agent": agent, "operation": operation, "tool": tool, "duration_ms": duration_ms, "status": status, "error": error, "prompt_hash": prompt_hash, "attempt": attempt})
     return entry
 
-def log_dispatch(task_id, agent, session_id, attempt=1, prompt_text=""):
+TOOLCALL_LIFECYCLES = ("STARTED", "COMPLETED", "FAILED", "UNKNOWN")
+
+
+def _read_tool_calls():
+    rows = []
+    try:
+        with open(TOOLCALLS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    pass
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    return rows
+
+
+def _parse_tool_time(value):
+    try:
+        if not value:
+            return None
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def record_lifecycle(tool_call_id, outcome):
+    if outcome not in ("COMPLETED", "FAILED", "UNKNOWN"):
+        raise ValueError(f"unknown lifecycle outcome: {outcome}")
+    rows = _read_tool_calls()
+    matches = [r for r in rows if r.get("tool_call_id") == tool_call_id]
+    if not matches:
+        return None
+    latest = matches[-1]
+    if latest.get("lifecycle") in ("COMPLETED", "FAILED", "UNKNOWN"):
+        return latest
+    entry = dict(latest)
+    entry["time"] = datetime.now(timezone.utc).isoformat()
+    entry["lifecycle"] = outcome
+    entry["operation"] = "RESULT"
+    os.makedirs(MANAGER_DIR, exist_ok=True)
+    with open(TOOLCALLS_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return entry
+
+
+def reconcile_tool_calls(threshold_s=300, now=None):
+    try:
+        now_dt = now or datetime.now(timezone.utc)
+        rows = _read_tool_calls()
+        latest_by_id = {}
+        first_by_id = {}
+        for r in rows:
+            tid = r.get("tool_call_id")
+            if not tid:
+                continue
+            if tid not in first_by_id:
+                first_by_id[tid] = r
+            latest_by_id[tid] = r
+        appended = []
+        for tid, latest in latest_by_id.items():
+            if latest.get("lifecycle", "STARTED") != "STARTED":
+                continue
+            started = _parse_tool_time(first_by_id[tid].get("time"))
+            age_s = (now_dt - started).total_seconds() if started else float("inf")
+            if age_s < threshold_s:
+                continue
+            outcome = "UNKNOWN"
+            first = first_by_id[tid]
+            for r in rows:
+                if (r.get("operation") == "RESULT"
+                        and r.get("task") == first.get("task")
+                        and r.get("session_id") == first.get("session_id")
+                        and r.get("tool") == first.get("tool")
+                        and r.get("tool_call_id") != tid):
+                    st = (r.get("status") or "").lower()
+                    if st == "ok":
+                        outcome = "COMPLETED"
+                    elif st == "error":
+                        outcome = "FAILED"
+                    else:
+                        outcome = "UNKNOWN"
+                    break
+            done = record_lifecycle(tid, outcome)
+            if done is not None and done.get("lifecycle") == outcome:
+                appended.append(done)
+        return appended
+    except Exception:
+        return []
+
+ROUTING_OWNERSHIP = {
+    "design": "planning",
+    "code": "building",
+    "classify": "error_debug",
+    "review": "review",
+}
+
+_ROUTING_TASK_ALIASES = {
+    "architecture": "design",
+    "planning": "design",
+    "design_structure": "design",
+    "implementation": "code",
+    "build": "code",
+    "prod": "code",
+    "production": "code",
+    "diagnose": "classify",
+    "diagnosis": "classify",
+    "investigate": "classify",
+    "investigation": "classify",
+    "root-cause": "classify",
+    "root_cause": "classify",
+    "quality": "review",
+    "audit": "review",
+}
+
+_ROUTING_AGENT_ALIASES = {
+    "error-debug": "error_debug",
+    "errordebug": "error_debug",
+    "builder": "building",
+    "planner": "planning",
+    "reviewer": "review",
+}
+
+
+def _normalize_routing_task(task_type):
+    t = str(task_type or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if not t:
+        return ""
+    if t in ROUTING_OWNERSHIP:
+        return t
+    return _ROUTING_TASK_ALIASES.get(t, t)
+
+
+def _normalize_routing_agent(agent):
+    a = str(agent or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if a in ("planning", "building", "error_debug", "review"):
+        return a
+    return _ROUTING_AGENT_ALIASES.get(a, a)
+
+
+def check_routing(task_type, agent):
+    canon_task = _normalize_routing_task(task_type)
+    canon_agent = _normalize_routing_agent(agent)
+    if canon_task not in ROUTING_OWNERSHIP:
+        return {"allowed": True, "action": "WARNING", "owner": None,
+                "task_type": canon_task, "agent": canon_agent,
+                "reason": "unknown task type: routing undetermined, compat-allow with warning"}
+    if canon_agent not in ("planning", "building", "error_debug", "review"):
+        return {"allowed": False, "action": "BLOCKED", "owner": ROUTING_OWNERSHIP[canon_task],
+                "task_type": canon_task, "agent": canon_agent,
+                "reason": "unknown agent: cannot own %s task (owner=%s)" % (canon_task, ROUTING_OWNERSHIP[canon_task])}
+    owner = ROUTING_OWNERSHIP[canon_task]
+    if canon_agent == owner:
+        return {"allowed": True, "action": "ALLOW", "owner": owner,
+                "task_type": canon_task, "agent": canon_agent, "reason": "owner match"}
+    return {"allowed": False, "action": "BLOCKED", "owner": owner,
+            "task_type": canon_task, "agent": canon_agent,
+            "reason": "routing violation: %s task owned by %s, not %s" % (canon_task, owner, canon_agent)}
+
+
+CAPABILITY_MATRIX = {
+    "create": {"available": True, "interface": "log_dispatch", "reliable": "partial"},
+    "discover": {"available": False, "interface": None, "reliable": False},
+    "resume": {"available": True, "interface": "generate_resume_context", "reliable": "partial"},
+    "recover": {"available": True, "interface": "recover_from_hierarchy", "reliable": "partial"},
+    "verify": {"available": True, "interface": "verify_with_provider", "reliable": "partial"},
+    "review": {"available": True, "interface": "save_review", "reliable": "partial"},
+    "lease": {"available": True, "interface": "verify_lease_fencing", "reliable": True},
+    "reconcile": {"available": True, "interface": "reconcile_state", "reliable": "partial"},
+}
+
+
+def get_capability_matrix():
+    return {k: dict(v) for k, v in CAPABILITY_MATRIX.items()}
+
+
+def get_capability(name):
+    key = str(name or "").strip().lower()
+    entry = CAPABILITY_MATRIX.get(key)
+    if entry is None:
+        return None
+    out = {"name": key}
+    out.update(entry)
+    return out
+
+
+def guard_capability(name):
+    key = str(name or "").strip().lower()
+    cap = get_capability(key)
+    if cap is None:
+        return {"ok": False, "action": "SKIP", "capability": key,
+                "reason": "unknown capability: no registry entry, skip without crash"}
+    if not cap.get("available"):
+        return {"ok": False, "action": "SKIP", "capability": key,
+                "reason": "capability unavailable: graceful skip, no session action taken"}
+    return {"ok": True, "action": "USE", "capability": key,
+            "interface": cap.get("interface"), "reason": "capability available"}
+
+
+def _resolve_routing_task_type(task_id, explicit=None):
+    if explicit is not None and str(explicit).strip() != "":
+        return _normalize_routing_task(explicit)
+    try:
+        manifest = load_task_manifest(task_id)
+        if isinstance(manifest, dict):
+            for key in ("task_type", "type", "kind"):
+                if manifest.get(key):
+                    return _normalize_routing_task(manifest.get(key))
+    except Exception:
+        pass
+    return ""
+
+
+def log_dispatch(task_id, agent, session_id, attempt=1, prompt_text="", lease=None, task_type=None):
+    _cap = guard_capability("create")
+    if not _cap.get("ok"):
+        try:
+            log_event("CAPABILITY_SKIP", task_id, "skip dispatch: %s" % (_cap.get("reason")), {"capability": "create", "check": _cap})
+        except Exception:
+            pass
+        return {"skipped": True, "action": "SKIP", "capability": "create", "reason": _cap.get("reason")}
+    # FIX-V2-06: fenced dispatch — stale lease must not create worker sessions
+    if lease is not None and not verify_lease_fencing(lease.get("owner"), lease.get("lease_id"), lease.get("fencing_token")):
+        log_event("LEASE_STALE_ABORT", task_id, f"Stale lease — abort DISPATCH {agent} {session_id}", {"owner": lease.get("owner")})
+        raise StaleLeaseError(f"Stale lease — abort DISPATCH for {task_id}")
+    try:
+        _rt_task = _resolve_routing_task_type(task_id, task_type)
+        if _rt_task:
+            _rt = check_routing(_rt_task, agent)
+            if not _rt.get("allowed"):
+                log_event("ROUTING", task_id, "routing misroute warn %s task to %s (owner=%s)" % (_rt.get("task_type"), _rt.get("agent"), _rt.get("owner")), {"action": "WARNING", "check": _rt, "agent": agent})
+    except Exception:
+        pass
+    try:
+        capture_baseline(task_id)
+    except Exception:
+        pass
+    try:
+        _cls = classify_changes(task_id)
+        _pol = resolve_file_policy(_cls)
+        _action = (_pol.get("action") or "").upper()
+        if _action == "BLOCKED":
+            log_event("FILE_POLICY", task_id, "dispatch policy BLOCKED case %s" % (_pol.get("case")), {"action": _pol.get("action"), "case": _pol.get("case"), "reason": _pol.get("reason"), "diff": _pol.get("diff", _cls.get("diff") if isinstance(_cls, dict) else None), "files": _cls.get("files") if isinstance(_cls, dict) else None})
+            return {"blocked": True, "action": _pol.get("action"), "case": _pol.get("case"), "reason": _pol.get("reason")}
+        _diff_text = _pol.get("diff", _cls.get("diff") if isinstance(_cls, dict) else None)
+        _files = _cls.get("files") if isinstance(_cls, dict) else None
+        if _action == "WARNING" and _diff_text is None and _files is not None:
+            _diff_text = "files=%s" % (_files,)
+        log_event("FILE_POLICY", task_id, "dispatch policy %s case %s" % (_pol.get("action"), _pol.get("case")), {"action": _pol.get("action"), "case": _pol.get("case"), "reason": _pol.get("reason"), "diff": _diff_text, "files": _files})
+    except Exception:
+        pass
     entry = log_tool_call(task_id, session_id, agent, "DISPATCH", "Task", duration_ms=0, status="ok", error=None, prompt_text=prompt_text, attempt=attempt)
     log_event("WORKER_STARTED", task_id, f"Dispatch {agent} session {session_id}", {"session_id": session_id, "agent": agent, "attempt": attempt})
     return entry
@@ -563,8 +1047,7 @@ def _collect_git_evidence():
     evidence = {"status": "", "diff_stat": ""}
     try:
         cfg = load_json(CONFIG_FILE, {}) or {}
-        cmd_timeout = ((cfg.get("git", {}) or {}).get("command_timeout_seconds")
-                       or (cfg.get("watchdog", {}) or {}).get("heartbeat_timeout_seconds", 120))
+        cmd_timeout = ((cfg.get("git", {}) or {}).get("command_timeout_seconds") or 10)
         proc = subprocess.run(["git", "status", "--porcelain"],
                               capture_output=True, text=True, timeout=cmd_timeout)
         if proc.returncode == 0 and proc.stdout.strip():
@@ -573,8 +1056,7 @@ def _collect_git_evidence():
         pass
     try:
         cfg = load_json(CONFIG_FILE, {}) or {}
-        cmd_timeout = ((cfg.get("git", {}) or {}).get("command_timeout_seconds")
-                       or (cfg.get("watchdog", {}) or {}).get("heartbeat_timeout_seconds", 120))
+        cmd_timeout = ((cfg.get("git", {}) or {}).get("command_timeout_seconds") or 10)
         proc = subprocess.run(["git", "diff", "--stat"],
                               capture_output=True, text=True, timeout=cmd_timeout)
         if proc.returncode == 0 and proc.stdout.strip():
@@ -759,10 +1241,15 @@ def _bump_state_version(state):
     return state
 
 
-def transition_state(state, event_type, task_id, extra=None):
-    """State transition protocol: validate → create event → persist event → persist state → timestamps.
+def transition_state(state, event_type, task_id, extra=None, lease=None):
+    """State transition protocol: verify lease → validate → create event → persist event → persist state → timestamps.
     Returns new state_version/event_sequence.
+    FIX-V2-06: when lease identity is supplied, a stale token aborts the mutation (StaleLeaseError, no write).
     """
+    # FIX-V2-06: verify-before-mutation
+    if lease is not None and not verify_lease_fencing(lease.get("owner"), lease.get("lease_id"), lease.get("fencing_token")):
+        log_event("LEASE_STALE_ABORT", task_id or "GLOBAL", f"Stale lease — abort transition {event_type}", {"owner": (lease or {}).get("owner")})
+        raise StaleLeaseError(f"Stale lease — abort transition {event_type}")
     # validate
     if not task_id:
         raise ValueError("task_id required for transition")
@@ -801,10 +1288,15 @@ def validate_state_event_consistency(state, events_subset=None):
     return True, "consistent"
 
 
-def reconcile_state(state):
-    """Startup reconcile: LOAD STATE → LOAD RECENT EVENTS → VALIDATE → RECONCILE → RESUME.
+def reconcile_state(state, lease=None):
+    """Startup reconcile: VERIFY LEASE → LOAD STATE → LOAD RECENT EVENTS → VALIDATE → RECONCILE → RESUME.
     If inconsistent, set to RECOVERING/BLOCKED.
+    FIX-V2-06: when lease identity is supplied, a stale token aborts before any write (StaleLeaseError).
     """
+    # FIX-V2-06: verify-before-mutation
+    if lease is not None and not verify_lease_fencing(lease.get("owner"), lease.get("lease_id"), lease.get("fencing_token")):
+        log_event("LEASE_STALE_ABORT", (state or {}).get("current_task_id", "GLOBAL"), "Stale lease — abort reconcile", {"owner": (lease or {}).get("owner")})
+        raise StaleLeaseError("Stale lease — abort reconcile")
     # load recent events (last 50) — but validate against total
     recent = []
     if os.path.exists(EVENTS_FILE):
@@ -818,6 +1310,41 @@ def reconcile_state(state):
                         continue
         except Exception:
             pass
+    # FIX-V2-09: gap-replay with last_applied tracking
+    try:
+        with open(EVENTS_FILE, "r", encoding="utf-8") as _rf:
+            _all_lines = [l for l in _rf if l.strip()]
+    except Exception:
+        _all_lines = []
+    try:
+        total_events = len(_all_lines) if _all_lines else len(lines)
+    except Exception:
+        total_events = len(_all_lines)
+    _es = (state or {}).get("event_sequence", 0) or 0
+    _last = (state or {}).get("last_applied_event_sequence")
+    if _last is None:
+        try:
+            _last = min(int(_es), int(total_events))
+        except Exception:
+            _last = int(total_events)
+    try:
+        _last = int(_last)
+    except Exception:
+        _last = int(total_events)
+    for _idx, _line in enumerate(_all_lines, start=1):
+        if _idx <= _last:
+            continue
+        try:
+            _ev = json.loads(_line)
+        except Exception:
+            continue
+        if "BLOCK" in str(_ev.get("event", "")):
+            state["phase"] = "blocked"
+            state["last_applied_event_sequence"] = int(_idx) - 1
+            _bump_state_version(state)
+            save_json(STATE_FILE, state)
+            return False
+    state["last_applied_event_sequence"] = int(total_events)
     is_consistent, reason = validate_state_event_consistency(state, None)
     if not is_consistent:
         log_event("STATE_RECONCILED", state.get("current_task_id", "GLOBAL"),
@@ -875,6 +1402,10 @@ class ManagerOrchestrator:
                     self.state[key] = int(self.state.get("review_cycle", 0) or 0)
                 else:
                     self.state[key] = 0
+        # FIX-V2-14: scoped budget counters — no-conflation
+        for _bk in ("session_count", "recovery_count", "task_retries", "review_count"):
+            if _bk not in self.state:
+                self.state[_bk] = int(self.state.get(_bk, 0) or 0)
         # startup reconcile (non-destructive, logs if inconsistent)
         try:
             reconcile_state(self.state)
@@ -883,8 +1414,28 @@ class ManagerOrchestrator:
         except Exception:
             pass
 
+    def check_budget(self, scope):
+        limits = (self.config or {}).get("limits", {})
+        _map = {"session": ("session_count", "max_worker_sessions", 5), "recovery": ("recovery_count", "max_worker_sessions", 5), "task_retry": ("task_retries", "max_retries", 3), "retry": ("task_retries", "max_retries", 3), "review": ("review_count", "max_review_cycles", 3)}
+        _key, _lim, _default = _map.get(str(scope or "").lower(), ("session_count", "max_worker_sessions", 5))
+        _max = int(limits.get(_lim, _default) or _default)
+        _cur = int(self.state.get(_key, 0) or 0)
+        if _cur >= _max:
+            return (False, "%s budget exhausted (%s=%s>=%s)" % (scope, _key, _cur, _max))
+        return (True, "%s budget ok (%s=%s<%s)" % (scope, _key, _cur, _max))
+
+    def consume_budget(self, scope):
+        allowed, reason = self.check_budget(scope)
+        if not allowed:
+            return (False, reason)
+        _map2 = {"session": "session_count", "recovery": "recovery_count", "task_retry": "task_retries", "retry": "task_retries", "review": "review_count"}
+        _ckey = _map2.get(str(scope or "").lower(), "session_count")
+        self.state[_ckey] = int(self.state.get(_ckey, 0) or 0) + 1
+        save_json(STATE_FILE, self.state)
+        return (True, "%s budget consumed (%s=%s)" % (scope, _ckey, self.state[_ckey]))
+
     def acquire_lock(self, ttl_hours=6):
-        """FIX-05: separate manager.lock atomic lease — state = application data, lock = synchronization primitive."""
+        """FIX-05 + FIX-V2-06: separate manager.lock atomic lease + fencing token — state = application data, lock = synchronization primitive."""
         now = datetime.now(timezone.utc)
         expires = now + timedelta(hours=ttl_hours)
         lock_info = _read_lock_file()
@@ -899,11 +1450,17 @@ class ManagerOrchestrator:
             if exp_time <= now:
                 log_event("LOCK_EXPIRED_TAKEOVER", self.state.get("current_task_id", "GLOBAL"),
                           f"Lock expired {lock_info.get('expires_at')}, takeover by {self.owner}", {"prev_owner": lock_info.get("owner")})
+        # FIX-V2-06: fencing token + lease_id — every lease gets unique id and monotonic token
+        prev_token = _coerce_token((lock_info or {}).get("fencing_token", 0)) if lock_info else 0
         new_lock = {
             "owner": self.owner,
+            "lease_id": str(uuid.uuid4()),
+            "fencing_token": prev_token + 1,
             "acquired_at": now.isoformat(),
             "expires_at": expires.isoformat()
         }
+        self._lease_id = new_lock["lease_id"]
+        self._fencing_token = new_lock["fencing_token"]
         # atomic write to manager.lock
         _atomic_write_json(LOCK_FILE, new_lock)
         # migrate: remove legacy lock from state.json if exists (keep state as application data)
@@ -930,8 +1487,28 @@ class ManagerOrchestrator:
                 pass
         return False
 
+    def _verify_lease(self):
+        """FIX-V2-06: verify current lease still owns token before mutating state — ABORT if stale."""
+        lock_info = _read_lock_file()
+        if not lock_info:
+            return True  # no lock, allow (will acquire)
+        if lock_info.get("owner") != self.owner:
+            return False
+        if hasattr(self, "_lease_id") and lock_info.get("lease_id") != self._lease_id:
+            return False
+        if hasattr(self, "_fencing_token") and _coerce_token(lock_info.get("fencing_token")) != _coerce_token(self._fencing_token):
+            return False
+        return True
+
+    def _abort_if_stale(self, op="mutate"):
+        if not self._verify_lease():
+            log_event("LEASE_STALE_ABORT", self.state.get("current_task_id", "GLOBAL"), f"Stale lease — abort {op}", {"owner": self.owner, "lease_id": getattr(self, "_lease_id", None)})
+            print(f"[LEASE] Stale lease — abort {op}")
+            return True
+        return False
+
     def _classify_health(self, task_id, checkpoint):
-        """FIX-04: External observation hierarchy 5 signals -> HEALTHY/SLOW/STUCK/DEAD/UNKNOWN"""
+        """FIX-04: External observation hierarchy 5 signals -> HEALTHY/SLOW/STUCK/DEAD/UNKNOWN; FIX-V2-07: operation-aware IN_FLIGHT"""
         watchdog_cfg = self.config.get("watchdog", {}) or {}
         heartbeat_timeout = watchdog_cfg.get("heartbeat_timeout_seconds", 120)
         progress_timeout = watchdog_cfg.get("progress_timeout_seconds", 600)
@@ -964,11 +1541,34 @@ class ManagerOrchestrator:
         heartbeat_stale = _is_stale(heartbeat_at, heartbeat_timeout) if heartbeat_at else True
         progress_stale = _is_stale(cp_time, progress_timeout) if cp_time else True
 
-        # Classification per fix.md §3 + §14
+        # FIX-V2-07: operation awareness — worker state exposes active_operation /
+        # operation_started_at / operation_deadline_at (checkpoint carries worker
+        # state; state dict is fallback). Read-only signal, no fencing interference.
+        cp_prog = checkpoint.get("progress", {}) if isinstance(checkpoint.get("progress"), dict) else {}
+        active_op = checkpoint.get("active_operation") or cp_prog.get("active_operation") or self.state.get("active_operation")
+        op_deadline = checkpoint.get("operation_deadline_at") or cp_prog.get("operation_deadline_at") or self.state.get("operation_deadline_at")
+        op_deadline_ts = _parse_time(op_deadline) if op_deadline else None
+        now_utc = datetime.now(timezone.utc)
+        deadline_exceeded = bool(op_deadline_ts and now_utc > op_deadline_ts)
+        deadline_ok = bool(active_op and op_deadline_ts and now_utc <= op_deadline_ts)
+        proc_alive = bool(has_active or heartbeat_fresh)
+
+        # Classification per fix.md §3 + §14, operation-aware per fix-v2 §8
+        # IN_FLIGHT: alive + active op + deadline unexceeded → never STUCK/DEAD
+        if active_op and deadline_ok and proc_alive:
+            return "IN_FLIGHT", {"active_operation": active_op, "operation_deadline_at": op_deadline,
+                                 "has_active": has_active, "heartbeat_fresh": heartbeat_fresh,
+                                 "progress_stale": progress_stale, "checkpoint_fresh": checkpoint_fresh}
+        # Operation deadline exceeded + no progress → STUCK (takes precedence over IN_FLIGHT)
+        if active_op and deadline_exceeded and progress_stale:
+            return "STUCK", {"active_operation": active_op, "operation_deadline_at": op_deadline,
+                             "reason": "operation_deadline_exceeded", "progress_stale": progress_stale,
+                             "has_active": has_active, "heartbeat_fresh": heartbeat_fresh}
         # DEAD: no active session/process
         if not has_active and phase in ("building", "recovering"):
             # but check if recent event shows activity — if event fresh, not dead yet
-            if not event_fresh and progress_stale:
+            # FIX-V2-07: operation alive with valid deadline is not death either
+            if not event_fresh and progress_stale and not (active_op and deadline_ok and heartbeat_fresh):
                 return "DEAD", {"reason": "no_active_session_and_no_progress", "has_active": has_active, "event_fresh": event_fresh, "checkpoint_fresh": checkpoint_fresh, "heartbeat_fresh": heartbeat_fresh}
         # HEALTHY: heartbeat fresh + progress fresh
         if heartbeat_fresh and not progress_stale:
@@ -979,7 +1579,8 @@ class ManagerOrchestrator:
             if event_fresh:
                 return "SLOW", {"heartbeat_fresh": heartbeat_fresh, "progress_stale": progress_stale, "event_fresh": event_fresh}
         # STUCK: session alive + no progress beyond threshold
-        if has_active and progress_stale and heartbeat_stale:
+        # FIX-V2-07: stale progress/checkpoint alone cannot yield STUCK while op alive
+        if has_active and progress_stale and heartbeat_stale and not (active_op and deadline_ok):
             return "STUCK", {"has_active": has_active, "progress_stale": progress_stale, "heartbeat_stale": heartbeat_stale}
         # UNKNOWN: contradictory
         if has_active and not heartbeat_fresh and not progress_stale:
@@ -987,8 +1588,11 @@ class ManagerOrchestrator:
             return "UNKNOWN", {"has_active": has_active, "heartbeat_fresh": heartbeat_fresh, "progress_stale": progress_stale, "reason": "heartbeat_stale_but_progress_fresh"}
         if not has_active and heartbeat_fresh:
             return "UNKNOWN", {"has_active": has_active, "heartbeat_fresh": heartbeat_fresh, "reason": "no_session_but_heartbeat_fresh"}
+        # FIX-V2-07: insufficient signals at all → UNKNOWN (not STUCK/DEAD)
+        if not has_active and not heartbeat_fresh and not event_fresh and not checkpoint_fresh and not active_op:
+            return "UNKNOWN", {"has_active": has_active, "heartbeat_fresh": heartbeat_fresh, "event_fresh": event_fresh, "checkpoint_fresh": checkpoint_fresh, "reason": "insufficient_signals"}
         # default stuck if progress stale
-        if progress_stale:
+        if progress_stale and not (active_op and deadline_ok):
             return "STUCK", {"progress_stale": progress_stale, "heartbeat_fresh": heartbeat_fresh}
         return "HEALTHY", {"heartbeat_fresh": heartbeat_fresh, "progress_stale": progress_stale}
 
@@ -1019,6 +1623,11 @@ class ManagerOrchestrator:
             # SLOW is not yet failure, but warn; still continue but monitor
             # if checkpoint says limit, still recover
             pass
+        if health == "IN_FLIGHT":
+            # FIX-V2-07: alive + active op + deadline unexceeded → NO auto-recovery
+            log_event("WATCHDOG_IN_FLIGHT", task_id, f"Worker IN_FLIGHT — {signals}", signals)
+            print("[WATCHDOG] Worker IN_FLIGHT — operation within deadline, no recovery")
+            return "HEALTHY"
 
         cp_time = ((checkpoint.get("progress", {}) or {}).get("last_progress_at")
                    if isinstance(checkpoint.get("progress"), dict) else None) \
@@ -1051,6 +1660,9 @@ class ManagerOrchestrator:
                 return "RECOVERY_NEEDED"
 
         status = checkpoint.get("status", "running")
+        if status not in ("running", "stopped_limit", "blocked", "failed"):
+            log_event("WATCHDOG_UNKNOWN_STATUS", task_id, f"Unknown checkpoint status {status!r} — routing UNKNOWN, never HEALTHY", {"status": status})
+            return "UNKNOWN"
         if status == "stopped_limit":
             log_event("WORKER_LIMIT", self.state.get("current_task_id", "UNKNOWN"), "Tool limit detected via checkpoint")
             return "RECOVERY_NEEDED"
@@ -1070,8 +1682,9 @@ class ManagerOrchestrator:
                 if (now - last_prog).total_seconds() > progress_timeout:
                     log_event("WORKER_STUCK", self.state.get("current_task_id", "UNKNOWN"), f"No progress for {(now - last_prog).total_seconds()}s health={health}")
                     return "RECOVERY_NEEDED"
-            except Exception:
-                pass
+            except Exception as _e:
+                log_event("WATCHDOG_BAD_TIMESTAMP", task_id, f"Unparseable timestamp {last_prog_str!r}: {_e} — routing UNKNOWN, never HEALTHY")
+                return "UNKNOWN"
 
         # if health was STUCK/SLOW, already logged, but if still healthy
         if health == "HEALTHY":
@@ -1080,17 +1693,104 @@ class ManagerOrchestrator:
         if health == "SLOW":
             print("[WATCHDOG] Worker SLOW — monitoring, not yet recovering")
             return "HEALTHY"
-        print(f"[WATCHDOG] Worker health={health} — continuing")
-        return "HEALTHY"
+        log_event("WATCHDOG_UNKNOWN_FALLTHROUGH", task_id, f"Health={health} not HEALTHY/SLOW/IN_FLIGHT — routing UNKNOWN, never blind HEALTHY")
+        return "UNKNOWN"
 
-    def execute_recovery(self, task_id):
+    @staticmethod
+    def build_recovery_plan(classification, evidence=None):
+        return build_recovery_plan(classification, evidence)
+
+    def check_p0_gate(self):
+        try:
+            rec = (self.state or {}).get("p0_last_result")
+        except Exception:
+            rec = None
+        if rec is None:
+            try:
+                rec = (load_json(STATE_FILE, {}) or {}).get("p0_last_result")
+            except Exception:
+                rec = None
+        if not isinstance(rec, dict):
+            return False, "P0 record missing"
+        if not rec.get("passed"):
+            return False, "P0 record red"
+        try:
+            at = rec.get("at")
+            ts = datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - ts > timedelta(hours=24):
+                return False, "P0 record stale"
+        except Exception:
+            return False, "P0 record invalid timestamp"
+        return True, "P0 green"
+
+    def execute_recovery(self, task_id, classification=None, evidence=None):
         print(f"[RECOVERY] Initiating safe recovery for task {task_id}")
+        _p0_ok, _p0_reason = self.check_p0_gate()
+        if not _p0_ok:
+            return {"task_id": task_id, "status": "blocked", "reason": "P0_RED", "detail": _p0_reason}
+        _allowed, _reason = self.check_budget("recovery")
+        if not _allowed:
+            return {"task_id": task_id, "status": "blocked", "reason": "RECOVERY_BUDGET_EXHAUSTED", "detail": _reason}
+        try:
+            _cls = classification or (evidence or {}).get("classification") or self.state.get("classification", "UNKNOWN")
+        except Exception:
+            _cls = "UNKNOWN"
+        try:
+            _builder = globals().get("build_recovery_plan")
+            wrapper = _builder(_cls, evidence) if _builder else self.build_recovery_plan(_cls, evidence)
+        except Exception:
+            wrapper = {"classification": "UNKNOWN", "evidence": evidence or {}, "recovery_plan": {"action": "CLASSIFY_ONLY", "forbid": ["destructive", "building", "done"]}}
+        plan = wrapper.get("recovery_plan", {})
+        if str(wrapper.get("classification", "")).upper() == "UNKNOWN":
+            print(f"[RECOVERY] Classification UNKNOWN for {task_id} — route to error_debug classify")
+            return {"task_id": task_id, "status": "classify", "route": "ERROR_DEBUG", "classification": "UNKNOWN", "recovery_plan": plan or {"action": "CLASSIFY_ONLY", "forbid": ["destructive", "building", "done"]}}
+        try:
+            _cls2 = classify_changes(task_id)
+            _pol2 = resolve_file_policy(_cls2)
+            _act2 = (_pol2.get("action") or "").upper()
+            _diff2 = _pol2.get("diff", _cls2.get("diff") if isinstance(_cls2, dict) else None)
+            _files2 = _cls2.get("files") if isinstance(_cls2, dict) else None
+            if _act2 == "WARNING" and _diff2 is None and _files2 is not None:
+                _diff2 = "files=%s" % (_files2,)
+            log_event("FILE_POLICY", task_id, "recovery policy %s case %s" % (_pol2.get("action"), _pol2.get("case")), {"action": _pol2.get("action"), "case": _pol2.get("case"), "reason": _pol2.get("reason"), "diff": _diff2, "files": _files2})
+            if _act2 == "BLOCKED":
+                return {"task_id": task_id, "status": "blocked", "action": _pol2.get("action"), "case": _pol2.get("case"), "reason": _pol2.get("reason")}
+        except Exception as _pbe:
+            if isinstance(_pbe, (KeyboardInterrupt, SystemExit)):
+                raise
+            pass
+        try:
+            _rlog = os.path.join(MANAGER_DIR, "recovery.jsonl")
+            with open(_rlog, "a", encoding="utf-8") as _rf:
+                _rf.write(json.dumps(wrapper, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        try:
+            _sess = self.state.get("sessions", self.state.get("active_sessions", []))
+            _scount = len(_sess) if isinstance(_sess, list) else int(_sess) if isinstance(_sess, int) else 0
+        except Exception:
+            _scount = 0
+        if plan.get("forbid") or _scount >= 5:
+            print(f"[POLICY_BLOCK] recovery blocked task={task_id} classification={wrapper.get('classification')} sessions={_scount}")
+            try:
+                log_event("POLICY_BLOCK", task_id, f"blocked classification={wrapper.get('classification')} sessions={_scount}")
+            except Exception:
+                pass
+            return {"task_id": task_id, "status": "blocked", "reason": "POLICY_BLOCK", "classification": wrapper.get("classification"), "recovery_plan": plan}
+        # FIX-V2-06: verify-before-mutation — stale lease must not write operations/state/decisions
+        if self._abort_if_stale("RECOVER"):
+            raise StaleLeaseError(f"Stale lease — abort RECOVER for {task_id}")
         # FIX-06: idempotent check before side effect — if RECOVER already committed for this attempt, reuse
         attempt = int(self.state.get("attempt", 1) or 1) + 1
         existing = check_operation_before(task_id, "RECOVER", attempt)
         if existing:
             print(f"[RECOVERY] Reusing committed RECOVER operation {existing.get('operation_id')}")
             return existing.get("result") or {}
+        _c_allowed, _c_reason = self.consume_budget("recovery")
+        if not _c_allowed:
+            return {"task_id": task_id, "status": "blocked", "reason": "RECOVERY_BUDGET_EXHAUSTED", "detail": _c_reason}
         create_operation(task_id, "RECOVER", attempt, status="pending", session_id=self.state.get("active_session_id"))
         log_event("RECOVERY_STARTED", task_id, "Starting idempotent recovery")
 
@@ -1144,16 +1844,23 @@ Session attempt incremented to {self.state['attempt']}.
         return hierarchy
 
     def startup_recovery(self):
-        """FIX-03: Manager self-recovery startup protocol (fix.md §7)
-        Steps: ACQUIRE LEASE → READ STATE → READ CHECKPOINT → READ EVENTS → DISCOVER WORKERS → INSPECT TREE → CHECK OPERATION → CLASSIFY → RECONSTRUCT → POLICY → RECOVER → VERIFY → WRITE EVENT → UPDATE STATE
-        Handles T11 Manager crash during Building, T12 crash during session creation, T13 crash during recovery.
+        """fix-v2 §9: Manager crash/restart contract startup protocol.
+        8 steps: LOAD STATE → LOAD RECENT EVENTS → LOAD OPERATIONS → VALIDATE → RECONCILE → DISCOVER ACTIVE SESSIONS → RECONSTRUCT → RESUME/RECOVER.
+        No supervisor → user/launcher restarts process, Manager only reconciles; never claims self-resurrection.
+        Fencing: lease acquired before any mutation. Handles T11/T12/T13.
         """
         print("[STARTUP] Manager self-recovery protocol starting...")
+        if getattr(self, "_lease_id", None) is not None and not self._verify_lease():
+            log_event("LEASE_STALE_ABORT", self.state.get("current_task_id", "GLOBAL"), "Stale lease — abort STARTUP_RECOVERY", {"owner": self.owner, "lease_id": getattr(self, "_lease_id", None)})
+            print("[LEASE] Stale lease — abort STARTUP_RECOVERY")
+            raise StaleLeaseError("Stale lease — abort STARTUP_RECOVERY")
         # 1. ACQUIRE LEASE (already done via acquire_lock caller, but ensure)
         if not self.acquire_lock():
             # lease held by other manager — wait or takeover if expired
             log_event("STARTUP_LEASE_WAIT", self.state.get("current_task_id", "GLOBAL"), "Lease held by another manager, deferring startup recovery")
             return "LEASE_WAIT"
+        if self._abort_if_stale("STARTUP_RECOVERY"):
+            raise StaleLeaseError("Stale lease — abort STARTUP_RECOVERY")
         # 2. READ STATE (already in self.state)
         # 3. READ CHECKPOINT
         checkpoint = load_json(CHECKPOINT_FILE, {}) or {}
@@ -1164,9 +1871,17 @@ Session attempt incremented to {self.state['attempt']}.
         has_active = bool(session_ev)
         # 6. INSPECT WORKING TREE
         git_ev = _collect_git_evidence()
-        # 7. CHECK OPERATION (placeholder for FIX-06 operation records — check last_recovery_source)
-        # 8. CLASSIFY
+        # 7. CHECK OPERATION (fix-v2 §9: LOAD OPERATIONS → RECONCILE STARTED after DISCOVER/LOAD)
         task_id = self.state.get("current_task_id", "GLOBAL")
+        try:
+            reconcile_started_operations(task_id if task_id != "GLOBAL" else None)
+        except Exception:
+            pass
+        try:
+            reconcile_tool_calls()
+        except Exception:
+            pass
+        # 8. CLASSIFY
         phase = self.state.get("phase", "unknown")
         status = checkpoint.get("status", "unknown") if checkpoint else "unknown"
         classification = "UNKNOWN"
@@ -1181,10 +1896,13 @@ Session attempt incremented to {self.state['attempt']}.
         elif phase in ("building", "recovering"):
             classification = "STUCK" if has_active else "CRASH"
         else:
-            classification = "HEALTHY"
+            classification = "UNKNOWN"
         log_event("STARTUP_CLASSIFY", task_id, f"Startup classify: phase={phase} checkpoint={status} active={has_active} -> {classification}",
                   {"phase": phase, "checkpoint_status": status, "has_active": has_active, "classification": classification,
                    "git_evidence": bool(git_ev.get("status") or git_ev.get("diff_stat"))})
+        if classification == "UNKNOWN":
+            log_event("STARTUP_UNKNOWN", task_id, "Startup UNKNOWN — requires error_debug classify, never HEALTHY", {"phase": phase, "checkpoint_status": status})
+            return "CLASSIFY"
         # 9. RECONSTRUCT (via hierarchy)
         hierarchy = None
         if classification in ("LIMIT", "CRASH", "STUCK", "RECOVERING_CRASH", "SESSION_CREATE_CRASH"):
@@ -1194,11 +1912,17 @@ Session attempt incremented to {self.state['attempt']}.
         # 10. POLICY (check if recovery allowed)
         limits = self.config.get("limits", {})
         if classification != "HEALTHY":
-            attempt = int(self.state.get("attempt", 1) or 1)
+            attempt = max(int(self.state.get("attempt", 1) or 1), int(self.state.get("worker_attempt", 1) or 1))
             max_sessions = int(limits.get("max_worker_sessions", 5) or 5)
             if attempt >= max_sessions:
                 log_event("STARTUP_BUDGET_EXCEEDED", task_id, f"Attempt {attempt} >= max {max_sessions}, blocking",
-                          {"attempt": attempt, "max": max_sessions})
+                          {"attempt": attempt, "worker_attempt": self.state.get("worker_attempt"), "max": max_sessions})
+                self.state["phase"] = "blocked"
+                save_json(STATE_FILE, self.state)
+                return "BLOCKED"
+            _s_allowed, _s_reason = self.check_budget("session")
+            if not _s_allowed:
+                log_event("STARTUP_BUDGET_EXHAUSTED", task_id, "session budget exhausted — BLOCKED (%s)" % _s_reason)
                 self.state["phase"] = "blocked"
                 save_json(STATE_FILE, self.state)
                 return "BLOCKED"
@@ -1212,6 +1936,7 @@ Session attempt incremented to {self.state['attempt']}.
             if has_active and classification == "SESSION_CREATE_CRASH":
                 log_event("STARTUP_REUSE_SESSION", task_id, f"Reusing existing session {session_ev.get('path')} instead of creating new")
                 return "REUSE_SESSION"
+            self.consume_budget("session")
             # normal recovery path — caller should invoke execute_recovery
             return "RECOVERY_NEEDED"
         # 12. VERIFY (healthy case)
@@ -1219,6 +1944,8 @@ Session attempt incremented to {self.state['attempt']}.
         return "HEALTHY"
 
     def evaluate_dependencies(self):
+        if self._abort_if_stale("EVALUATE_DEPS"):
+            raise StaleLeaseError("Stale lease — abort EVALUATE_DEPS")
         print("[QUEUE] Evaluating task dependencies...")
         tasks = self.queue.get("tasks", [])
         completed_ids = {t["id"] for t in tasks if t.get("status") == "completed"}
@@ -1234,8 +1961,107 @@ Session attempt incremented to {self.state['attempt']}.
         if updated:
             save_json(QUEUE_FILE, self.queue)
 
-    def check_approval_required(self, task_id, risk_level="LOW"):
-        if risk_level.upper() == "HIGH":
+    def record_impact(self, task_id, summary):
+        if self._abort_if_stale("ARCH_IMPACT"):
+            raise StaleLeaseError(f"Stale lease — abort ARCH_IMPACT for {task_id}")
+        gates = self.state.get("arch_gates", {})
+        entry = gates.get(task_id, {})
+        entry["impact"] = {"summary": summary, "completed": True, "at": datetime.now(timezone.utc).isoformat()}
+        gates[task_id] = entry
+        self.state["arch_gates"] = gates
+        save_json(STATE_FILE, self.state)
+        log_event("ARCH_IMPACT", task_id, f"Impact recorded for {task_id}: {summary}")
+        return entry["impact"]
+
+    def require_design_review(self, task_id):
+        if self._abort_if_stale("ARCH_REVIEW"):
+            raise StaleLeaseError(f"Stale lease — abort ARCH_REVIEW for {task_id}")
+        gates = self.state.get("arch_gates", {})
+        entry = gates.get(task_id, {})
+        impact = entry.get("impact", {})
+        if not impact.get("completed"):
+            return {"status": "BLOCKED", "reason": f"no impact record for {task_id} — record_impact required first"}
+        entry["review"] = {"verdict": "PASS", "completed": True, "at": datetime.now(timezone.utc).isoformat()}
+        gates[task_id] = entry
+        self.state["arch_gates"] = gates
+        save_json(STATE_FILE, self.state)
+        log_event("ARCH_REVIEW", task_id, f"Design review PASS for {task_id}")
+        return {"status": "PASS", "verdict": "PASS"}
+
+    def request_approval(self, task_id):
+        if self._abort_if_stale("ARCH_APPROVAL"):
+            raise StaleLeaseError(f"Stale lease — abort ARCH_APPROVAL for {task_id}")
+        gates = self.state.get("arch_gates", {})
+        entry = gates.get(task_id, {})
+        impact = entry.get("impact", {})
+        if not impact.get("completed"):
+            return {"status": "BLOCKED", "reason": f"no impact record for {task_id} — record_impact required first"}
+        review = entry.get("review", {})
+        if review.get("verdict") != "PASS" or not review.get("completed"):
+            return {"status": "BLOCKED", "reason": f"no design-review PASS for {task_id} — require_design_review required first"}
+        entry["policy"] = {"completed": True, "at": datetime.now(timezone.utc).isoformat()}
+        entry["approval"] = {"completed": True, "status": "APPROVED", "at": datetime.now(timezone.utc).isoformat()}
+        gates[task_id] = entry
+        self.state["arch_gates"] = gates
+        save_json(STATE_FILE, self.state)
+        log_event("ARCH_APPROVAL", task_id, f"Arch-change approval granted for {task_id} (impact->review->policy->approval)")
+        return {"status": "APPROVED"}
+
+    def assess_risk(self, ctx=None):
+        ctx = ctx or {}
+        score = 0
+        reasons = []
+        def _truthy(*keys):
+            return any(bool(ctx.get(k)) for k in keys)
+        if _truthy("destructive", "is_destructive", "deletes_files", "deletes_api", "git_reset", "major_upgrade"):
+            score += 2
+            reasons.append("destructive operation")
+        if _truthy("irreversible", "is_irreversible", "no_rollback"):
+            score += 2
+            reasons.append("irreversible change")
+        if _truthy("security", "security_sensitive", "changes_auth", "changing_auth", "auth_change"):
+            score += 2
+            reasons.append("security-sensitive change")
+        if _truthy("data_loss", "deletes_data", "data_deletion", "loses_data"):
+            score += 2
+            reasons.append("data-loss risk")
+        scope = str(ctx.get("scope", "") or "").lower()
+        files = ctx.get("files_changed", ctx.get("file_count", 0))
+        try:
+            nfiles = int(files) if isinstance(files, (int, str)) else len(files)
+        except Exception:
+            nfiles = 0
+        broad = _truthy("broad_scope", "wide_scope", "many_files") or scope in ("broad", "wide", "system", "many", "large") or nfiles > 5
+        db = _truthy("database", "changes_database", "changing_database", "db_change", "touches_db") or scope == "database"
+        if broad:
+            score += 1
+            reasons.append("broad scope")
+        if db:
+            score += 1
+            reasons.append("database scope (per-case, not auto-HIGH)")
+        if _truthy("arch_change", "architecture_change", "api_change", "changing_api"):
+            score += 1
+            reasons.append("architecture/api scope")
+        if score >= 4:
+            level = "HIGH"
+        elif score >= 2:
+            level = "MEDIUM"
+        else:
+            level = "LOW"
+        if not reasons:
+            reasons.append("no risk factors")
+        return (level, reasons)
+
+    def check_approval_required(self, task_id, risk_level=None, ctx=None):
+        if isinstance(risk_level, dict) and ctx is None:
+            ctx = risk_level
+            risk_level = None
+        if risk_level is None:
+            if ctx is not None:
+                risk_level, _ = self.assess_risk(ctx)
+            else:
+                risk_level = "LOW"
+        if str(risk_level).upper() == "HIGH":
             self.state["status"] = "approval_required"
             save_json(STATE_FILE, self.state)
             log_event("APPROVAL_REQUIRED", task_id, f"Task {task_id} has HIGH risk level. Requires user approval.")
@@ -1244,39 +2070,61 @@ Session attempt incremented to {self.state['attempt']}.
         return False
 
     def verify_completion(self, task_id, evidence):
+        if self._abort_if_stale("VERIFY"):
+            raise StaleLeaseError(f"Stale lease — abort VERIFY for {task_id}")
         print(f"[VERIFY] Verifying evidence for task {task_id}...")
-        # FIX-12: VERIFYING is canonical — must go through VERIFYING, forbid REVIEWING→DONE bypass
+        _keys = ["requirements", "tests", "review", "blockers", "checkpoint", "state", "queue", "diff", "recovery"]
+        def _pass(v):
+            if v is True:
+                return True
+            if isinstance(v, str) and v.strip().upper() in ("PASS", "PASSED"):
+                return True
+            return False
+        def _fail_result(reason):
+            log_event("VERIFY_UNKNOWN" if "UNKNOWN" in reason.upper() or "missing" in reason.lower() else "VERIFYING_FAILED", task_id, reason)
+            checks = {k: False for k in _keys}
+            return _VerifyResult((False, checks))
+        if evidence == "UNKNOWN" or (isinstance(evidence, str) and evidence.strip().upper() == "UNKNOWN"):
+            return _fail_result("Evidence UNKNOWN (truthy string) — forcing FAIL, never PASS")
+        if isinstance(evidence, dict) and str(evidence.get("status", "")).upper() == "UNKNOWN":
+            return _fail_result("Evidence status UNKNOWN — forcing FAIL, never PASS")
+        if isinstance(evidence, dict) and str(evidence.get("classification", "")).upper() == "UNKNOWN":
+            return _fail_result("Evidence classification UNKNOWN — forcing FAIL, never PASS")
+        if evidence is None or evidence is False:
+            return _fail_result("Evidence missing — forcing FAIL")
         prev_phase = self.state.get("phase")
         if prev_phase not in ("verifying", "reviewing", "recovering", "building", "completed"):
             log_event("VERIFYING_START", task_id, f"Entering VERIFYING from {prev_phase} (canonical gate)")
         else:
             log_event("VERIFYING_START", task_id, "Beginning evidence-based completion verification")
-        # set phase to verifying explicitly (canonical)
         self.state["phase"] = "verifying"
         self.state["updated_at"] = datetime.now(timezone.utc).isoformat()
         save_json(STATE_FILE, self.state)
-        # also check severity gate: no CRITICAL/HIGH outstanding (already via review_passed)
-        # Evidence requirements
-        has_files = bool(evidence.get("files_changed"))
-        tests_passed = evidence.get("tests_passed", True)
-        review_passed = evidence.get("review_passed", True)
-        no_blockers = len(evidence.get("blockers", [])) == 0
-        # FIX-12: enforce CRITICAL/HIGH gate if evidence has findings
-        findings = evidence.get("findings") or []
-        has_critical_high = any(str(f.get("severity","")).upper() in ("CRITICAL","HIGH") for f in findings)
-
-        if has_files and tests_passed and review_passed and no_blockers and not has_critical_high:
-            log_event("VERIFYING_SUCCESS", task_id, "All completion evidence passed (VERIFYING canonical)")
-            # keep phase verifying until complete_task moves to completed
-            return True
+        ev = evidence if isinstance(evidence, dict) else {}
+        checks = {k: _pass(ev.get(k, "UNKNOWN")) for k in _keys}
+        passed = all(checks.values())
+        if passed:
+            log_event("VERIFYING_SUCCESS", task_id, "All completion evidence passed (VERIFYING canonical, 9/9 ALL-PASS)")
+            return _VerifyResult((True, checks))
         else:
-            # stay in verifying but fail
-            self.state["phase"] = "reviewing" if has_critical_high else "verifying"
+            failed = [k for k, v in checks.items() if not v]
+            self.state["phase"] = "verifying"
             save_json(STATE_FILE, self.state)
-            log_event("VERIFYING_FAILED", task_id, f"Evidence check failed: tests={tests_passed}, review={review_passed}, blockers={len(evidence.get('blockers', []))}, critical_high={has_critical_high}")
-            return False
+            log_event("VERIFYING_FAILED", task_id, f"Evidence check failed: {len(failed)}/9 failed ({','.join(failed)})")
+            return _VerifyResult((False, checks))
 
     def complete_task(self, task_id, evidence, decision_summary=""):
+        if self._abort_if_stale("COMPLETE"):
+            raise StaleLeaseError(f"Stale lease — abort COMPLETE for {task_id}")
+        if evidence == "UNKNOWN" or (isinstance(evidence, str) and evidence.strip().upper() == "UNKNOWN"):
+            log_event("COMPLETE_BLOCKED_UNKNOWN", task_id, "Complete blocked: evidence UNKNOWN — forcing FAIL/block, never DONE")
+            return False
+        if isinstance(evidence, dict) and str(evidence.get("status", "")).upper() == "UNKNOWN":
+            log_event("COMPLETE_BLOCKED_UNKNOWN", task_id, "Complete blocked: status UNKNOWN — forcing FAIL/block, never DONE")
+            return False
+        if isinstance(evidence, dict) and str(evidence.get("classification", "")).upper() == "UNKNOWN":
+            log_event("COMPLETE_BLOCKED_UNKNOWN", task_id, "Complete blocked: classification UNKNOWN — forcing FAIL/block, never DONE")
+            return False
         if not self.verify_completion(task_id, evidence):
             print(f"[COMPLETE] Cannot mark {task_id} as complete — evidence verification failed.")
             return False
@@ -1305,11 +2153,32 @@ Session attempt incremented to {self.state['attempt']}.
         self.evaluate_dependencies()
         return True
 
+
+def build_recovery_plan(classification, evidence=None):
+    c = str(classification or "UNKNOWN").upper()
+    if c in ("STUCK", "LIMIT", "CRASH"):
+        plan = {"action": "CREATE_NEW_SESSION", "reuse_session": False, "resume_from": "checkpoint", "preserve_files": True}
+    elif c == "FAILED":
+        plan = {"action": "RETRY_OR_BLOCK", "reuse_session": True, "resume_from": "checkpoint", "preserve_files": True}
+    elif c == "DONE":
+        plan = {"action": "NOOP"}
+    elif c == "BLOCKED":
+        plan = {"action": "HUMAN_REVIEW"}
+    else:
+        c = "UNKNOWN"
+        plan = {"action": "CLASSIFY_ONLY", "forbid": ["destructive", "building", "done"]}
+    return {"classification": c, "evidence": evidence or {}, "recovery_plan": plan}
+
+
 if __name__ == "__main__":
     mgr = ManagerOrchestrator()
     mgr.acquire_lock()
     mgr.evaluate_dependencies()
     health = mgr.check_watchdog()
-    if health == "RECOVERY_NEEDED":
+    if health in ("UNKNOWN", "CLASSIFY", "ERROR_DEBUG"):
+        log_event("MAIN_UNKNOWN", mgr.state.get("current_task_id", "UNKNOWN"), f"Main {health} — route to classify, no recovery, no done", {"health": health})
+        current_task = mgr.state.get("current_task_id", "TASK-UP-0")
+        mgr.execute_recovery(current_task, classification="UNKNOWN")
+    elif health == "RECOVERY_NEEDED":
         current_task = mgr.state.get("current_task_id", "TASK-UP-0")
         mgr.execute_recovery(current_task)

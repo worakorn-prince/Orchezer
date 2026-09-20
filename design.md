@@ -257,6 +257,7 @@ Example (schema_version 2, hardened):
   "schema_version": 2,
   "state_version": 14,
   "event_sequence": 118,
+  "last_applied_event_sequence": 118,
   "project": "example",
   "status": "running",
   "current_task_id": "TASK-001",
@@ -292,7 +293,7 @@ Should store at minimum:
 - updated_at
 - last known result
 
-State transition protocol (see §26.5): validate → create event → persist event → persist state → update timestamps. On startup: LOAD STATE → LOAD RECENT EVENTS → VALIDATE CONSISTENCY → RECONCILE → RESUME. Inconsistent state → RECOVERING or BLOCKED, never duplicate worker.
+State transition protocol (see §26.5): validate → create event → persist event → persist state → update timestamps. On startup (see §26.29 crash/restart contract): LOAD STATE → LOAD RECENT EVENTS → LOAD OPERATIONS → VALIDATE → RECONCILE (incl. `reconcile_started_operations()`) → DISCOVER ACTIVE SESSIONS → RECONSTRUCT → RESUME/RECOVER. Inconsistent state → RECOVERING or BLOCKED, never duplicate worker. The Manager process never resurrects itself — with a supervisor the supervisor restarts it, without one the user/launcher restarts it and the Manager reconciles.
 
 ---
 
@@ -348,7 +349,7 @@ Example:
 ```json
 {
   "task_id": "TASK-001",
-  "status": "in_progress",
+  "status": "running",
   "phase": "implementation",
   "completed": [
     "database schema",
@@ -1197,7 +1198,7 @@ As a reliable orchestration layer, the Manager supports 8 core capabilities plus
 5. **Event Log**: append-only history at `.agent/manager/events.jsonl`, separate from state.json
 6. **Context Manager**: builds a just-in-time resume context file (`.agent/manager/context/<task_id>.resume.md`) sending only necessary data to a new Building session, cutting token noise
 7. **Lease / Lock**: prevents concurrent controllers with a lease on state.json (`owner`, `acquired_at`, `expires_at`)
-8. **Policy / Budget / Human Approval**: enforces limits (max sessions, review cycles, runtime), classifies risk (LOW, MEDIUM, HIGH) and mandates a Human Approval Gate for high-risk operations (e.g. destructive changes, database/architecture changes)
+8. **Policy / Budget / Human Approval**: enforces limits (max sessions, review cycles, runtime), classifies risk per-case via `assess_risk` (LOW, MEDIUM, HIGH) and mandates a Human Approval Gate only for HIGH-risk operations (destructive + irreversible / security-sensitive / data-loss combinations, not every database/architecture touch)
 
 ## Additional supporting structures
 - Truly dependency-aware Task Queue (`queue.json` schema v2)
@@ -1242,14 +1243,35 @@ All timeouts must come from `config.json`, never hard-coded: `heartbeat_timeout_
 OpenCode session/process status → session activity → event activity → checkpoint freshness → heartbeat
 ```
 
-Health classification (see §26.16):
+Health classification (see §26.16), operation-aware (fix-v2 §8):
 
 ```text
-HEALTHY — heartbeat fresh + progress fresh
-SLOW    — heartbeat fresh + progress delayed
-STUCK   — session alive + no progress beyond threshold
-DEAD    — session/process unavailable
-UNKNOWN — evidence contradictory or insufficient → must go to error_debug classify, no blind resume
+HEALTHY   — heartbeat fresh + progress fresh
+SLOW      — heartbeat fresh + progress delayed
+IN_FLIGHT — process alive + active operation + operation deadline unexceeded
+            → NO auto-recovery even if progress/checkpoint timestamps are old
+STUCK     — session alive + no progress beyond threshold, OR active operation
+            deadline exceeded
+DEAD      — session/process unavailable
+UNKNOWN   — evidence contradictory or insufficient → must go to error_debug classify, no blind resume
+```
+
+Worker state exposes the in-flight operation (checkpoint carries worker state):
+
+```json
+{
+  "active_operation": "RUN_TESTS",
+  "operation_started_at": "ISO-8601",
+  "operation_deadline_at": "ISO-8601"
+}
+```
+
+Rule: alive + active op + deadline unexceeded → NO auto-recovery. Stale
+progress/checkpoint alone cannot produce STUCK/DEAD while the operation is
+alive. Four timeouts are distinct:
+
+```text
+heartbeat timeout ≠ progress timeout ≠ operation timeout ≠ process death
 ```
 
 Manager must detect: worker not sending heartbeat, session disappeared, process hung, session alive but no progress, state not changing within threshold.
@@ -1339,13 +1361,15 @@ Required events: task created/queued/started, worker created/stopped/limit, chec
 1. validate transition 2. create event 3. persist event 4. persist state 5. update timestamps (state_version, event_sequence, updated_at)
 ```
 
-On Manager startup:
+On Manager startup (crash/restart contract, see §26.29):
 
 ```text
-LOAD STATE → LOAD RECENT EVENTS → VALIDATE CONSISTENCY (state_version/event_sequence/updated_at) → RECONCILE IF NEEDED → RESUME/RECOVER
+LOAD STATE → LOAD RECENT EVENTS → LOAD OPERATIONS → VALIDATE CONSISTENCY (state_version/event_sequence/updated_at) → RECONCILE (incl. reconcile_started_operations: STARTED ops must discover external side effects before retry, never blind re-execute) → DISCOVER ACTIVE SESSIONS (before creating any session, I9) → RECONSTRUCT → RESUME/RECOVER
 ```
 
-Inconsistent state → `RECOVERING` or `BLOCKED`, never duplicate worker.
+Inconsistent state → `RECOVERING` or `BLOCKED`, never duplicate worker. Lease fencing holds across restart: only the current valid lease mutates state (see §26.7).
+
+**FIX-V2-09 reconciliation repair (P0):** not every state/event mismatch is unrecoverable. Reconcile follows `STATE + EVENT LOG → RECONCILIATION → repairable? → YES: REPLAY / NO: BLOCK-RECOVER`. State tracks both `event_sequence` and `last_applied_event_sequence`; events after the last applied sequence are replayed in log order before any block decision. Sequence gap / ordering drift (state behind the log, ordinary events pending) is repairable → `REPLAY`, then continue. Only genuine conflicts — nothing replayable while validation still fails, or a `BLOCK`-family terminal event (`WORKER_BLOCKED`, `TASK_BLOCKED`, `QUEUE_BLOCKED`, `STARTUP_BUDGET_EXCEEDED`) pending in the unapplied window — go to `BLOCK` / `RECOVER`. Rule: never blanket-classify a mismatch as unrecoverable; mixed windows replay the repairable prefix and block only on the true conflict.
 
 ## 26.6 Context Manager
 
@@ -1368,10 +1392,18 @@ Context send priority: Resume Context > Checkpoint > Current State > Relevant de
 ```
 
 ```json
-{ "owner": "manager-01", "acquired_at": "ISO-8601", "expires_at": "ISO-8601" }
+{
+  "owner": "manager-01",
+  "lease_id": "lease-uuid",
+  "fencing_token": 42,
+  "acquired_at": "ISO-8601",
+  "expires_at": "ISO-8601"
+}
 ```
 
 Use leases instead of permanent locks — an expired lease lets a new Manager recover. Must acquire atomically (OS-level atomic or compare-and-swap). Prevents: a task executed twice, a worker controlled by two Manager instances, duplicate recovery. Manager crash must not leave permanent lock — expired lease can be taken over.
+
+FIX-V2-06 fencing (stale-owner protection): a lease can expire while the old Manager is still executing (`A gets lease → A stalls → lease expires → B gets lease → A resumes`). `lease_id` (uuid4, unique per acquisition) plus monotonic `fencing_token` (prev+1 on every acquisition, including takeover) distinguish the current valid lease from a stale one. Every state mutation must verify current ownership (`owner` + `lease_id` + `fencing_token` match the lock file) before mutating; if the token is stale → `ABORT MUTATION` (log `LEASE_STALE_ABORT`, perform no write). Invariant: only the current valid Manager lease may mutate persistent Manager state.
 
 ## 26.8 Policy / Budget / Human Approval
 
@@ -1384,25 +1416,29 @@ Use leases instead of permanent locks — an expired lease lets a new Manager re
 }
 ```
 
-Risk: LOW → automatic, MEDIUM → per policy, HIGH → APPROVAL_REQUIRED (e.g. changing databases, deleting APIs, changing auth, deleting many files, major dependency upgrades, git reset, destructive operations). The Manager must never bypass the approval gate.
+Risk: LOW → automatic, MEDIUM → per policy, HIGH → APPROVAL_REQUIRED. Risk is scored per-case by `assess_risk(ctx)`: +2 destructive, +2 irreversible, +2 security-sensitive/auth, +2 data-loss, +1 broad scope, +1 database scope, +1 architecture/api scope; 0-1 → LOW, 2-3 → MEDIUM, 4+ → HIGH. Database or API changes alone are LOW/MEDIUM and require approval only when combined with destructive, irreversible, security-sensitive or data-loss factors. The Manager must never bypass the approval gate when HIGH is assessed.
 
 Counter semantics are disambiguated (see §26.21): `worker_attempt` / `recovery_attempt` / `task_retry` / `review_cycle`.
+
+Budget hierarchy (FIX-V2-14): `session_count` (session, cap 5) / `recovery_count` (recovery, cap 5) / `task_retries` (retry, cap 3) / `review_count` (review, cap 3) — each scope burns exactly one counter via `check_budget`/`consume_budget`; no-conflation across scopes.
+
+FIX-V2-18 7-stage arch-change pipeline: `Arch change → Impact → Planning → Design Review → Policy → Approval → Building`. Each stage has a gate; no-skip rule — `request_approval` returns `BLOCKED` with no impact record, and `BLOCKED` with impact but no design-review `PASS`. `Design Review` is technical validation, `Human Approval` is authorization; both required before `Building`.
 
 ## 26.9 Dependency-Aware Queue
 
 Queue states: `pending | ready | running | blocked | failed | completed | cancelled` — the Manager checks `dependency complete?` before dispatch. Tasks whose dependencies haven't passed must not be dispatched.
 
-## 26.10 Enhanced State Machine (Canonical — fix.md §19)
+## 26.10 Enhanced State Machine (Canonical — fix.md §19 / fix-v2 §1)
 
 ```text
-IDLE → PLANNING → ERROR_DEBUG → BUILDING
+IDLE → PLANNING → BUILDING
 BUILDING → LIMIT/STUCK → RECOVERING → BUILDING
 BUILDING → REVIEWING → FAIL → BUILDING
 REVIEWING → PASS → VERIFYING → DONE | BLOCKED
 Additional: FAILED, CANCELLED, APPROVAL_REQUIRED, RECOVERING
 ```
 
-`RECOVERING` separates the recovery process from normal building. `VERIFYING` is mandatory — `REVIEWING → DONE` bypass is forbidden (see §17). Definitions: `REVIEWING` = quality/bugs/regression/security, `VERIFYING` = requirement + evidence + state + tests + diff + final acceptance.
+`RECOVERING` separates the recovery process from normal building. `VERIFYING` is mandatory — `REVIEWING → DONE` bypass is forbidden (see §17). `ERROR_DEBUG` is an **agent/task routing target**, not a Manager lifecycle state (see fix-v2 §1). `BUILDING_RESUME` is not a state — resume is `RECOVERING → BUILDING` transition. No other section may define an alternative Manager state machine. Definitions: `REVIEWING` = quality/bugs/regression/security, `VERIFYING` = requirement + evidence + state + tests + diff + final acceptance.
 
 ## 26.11 Recovery Protocol (Canonical — fix.md §20 + §26.11)
 
@@ -1497,11 +1533,24 @@ Transition protocol: `validate → create event → persist event → persist st
 
 ## 26.18 Lease Separation (fix.md §5 — P0)
 
-`state.json` = application data, `manager.lock` = synchronization primitive (atomic). Lease `{owner, acquired_at, expires_at}`; expired → takeover allowed; crash must not leave permanent lock.
+`state.json` = application data, `manager.lock` = synchronization primitive (atomic). Lease `{owner, lease_id, fencing_token, acquired_at, expires_at}`; expired → takeover allowed with `fencing_token = prev + 1` and a fresh `lease_id`; crash must not leave permanent lock. Guard: `ManagerOrchestrator._verify_lease()` checks `owner` + `lease_id` + `fencing_token` against the lock file; every mutation path (`transition_state`, `execute_recovery`, `startup_recovery`, `evaluate_dependencies`, `check_approval_required`, `verify_completion`, `complete_task`, dispatch) calls `_abort_if_stale(op)` first — stale token → `ABORT MUTATION`, no write. Invariant: only the current valid lease mutates state.
 
 ## 26.19 Baseline & User-Change Protection (fix.md §8 — P0)
 
 At `TASK START`: capture `git status` + file hashes baseline. Decide with `baseline + checkpoint.files_changed + current tree + git diff`. Never assume `all diff = worker changes`. Tests: `T09` user changes, `T18` same file as worker — must not reset/overwrite/clean user changes and must notify when ownership unclear.
+
+Baseline is captured at TASK START (git status + file hashes). checkpoint.files_changed is a hint, never authority. Ground truth order: baseline + current git diff > checkpoint list. Missing baseline → conservative BLOCKED.
+
+FIX-V2-13 Same-File Policy table (code: `resolve_file_policy`, hooks: `log_dispatch`, `execute_recovery` log `FILE_POLICY`, never silent overwrite):
+
+| Case | Condition | Action | Note |
+|---|---|---|---|
+| A | Different file (no user/unknown files) | CONTINUE | CONTINUE iff user file list empty |
+| B | User files present, no overlap proven | WARNING | continue with warning, non-overlap only if reliably identified |
+| C | Same file overlapping region | BLOCKED | human review, must not overwrite user change |
+| D | Ownership undetermined (no baseline / unknown files) | BLOCKED | do not guess |
+
+Intent priority: conflicting user intent decided by priority — user HIGH beats worker LOW → BLOCKED / worker yields; equal or higher user priority blocks.
 
 ## 26.20 Severity Standardization (fix.md §9 — P1)
 
@@ -1559,6 +1608,70 @@ READ recovery operation → already started? → already committed? → resume r
 
 Recovery itself is stateful and idempotent via operation records.
 
+## 26.29 Manager Crash / Restart Contract (fix-v2 §9)
+
+Guarantee stated explicitly — automatic process resurrection is provided
+only by an external supervisor/launcher, never by the Manager itself.
+
+With supervisor (automatic restart allowed):
+
+```text
+Supervisor
+    ↓
+Manager
+    ↓
+OpenCode workers
+```
+
+Manager crash recovery can be automatic: the supervisor resurrects the
+Manager process, then the Manager reconciles state on startup.
+
+Without supervisor (manual restart required):
+
+```text
+Manager crashes
+    ↓
+user / launcher restarts Manager
+    ↓
+Manager reconciles
+```
+
+No supervisor means no automatic resurrection. The user or launcher
+restarts the Manager process; the Manager only reconciles after restart.
+This spec never claims Manager self-resurrection.
+
+Required 8-step startup protocol (fix-v2 §9):
+
+```text
+LOAD STATE
+ ↓
+LOAD RECENT EVENTS
+ ↓
+LOAD OPERATIONS
+ ↓
+VALIDATE
+ ↓
+RECONCILE
+ ↓
+DISCOVER ACTIVE SESSIONS
+ ↓
+RECONSTRUCT
+ ↓
+RESUME / RECOVER
+```
+
+`startup_recovery()` implements this order: fencing lease is acquired
+before any mutation, STARTED operations are reconciled via
+`reconcile_started_operations(task_id)` after DISCOVER/LOAD OPERATIONS,
+active sessions are discovered before RECONSTRUCT, and recovery resumes
+re-entrantly without duplicating sessions.
+
+## 26.30 UNKNOWN Hard Boundary (fix-v2 §10)
+
+UNKNOWN/CLASSIFY/ERROR_DEBUG never transitions to DONE, destructive recovery, or blind building. The only allowed transition is route to classify with `CLASSIFY_ONLY` and forbid `["destructive", "building", "done"]`.
+
+ERROR_DEBUG-first: any UNKNOWN health, watchdog UNKNOWN, or evidence UNKNOWN must route to `ERROR_DEBUG` classify before any other action. No recovery and no done is permitted on this path.
+
 ## 26.25 OpenVisio Optional Provider (fix.md §12 — P1)
 
 ```text
@@ -1573,6 +1686,28 @@ Project config:
 
 Manager core never hard-codes Dashboard/mcp/OpenVisio assumptions; works with projects without OpenVisio.
 
+### Verification Provider Interface (FIX-V2-21)
+
+Core talks only to this contract. Provider specifics live in provider
+implementations behind a registry — never in core call-sites.
+
+```text
+can_verify(task) -> bool
+verify(task, evidence) -> { status: pass|fail|unavailable|skipped, provider, detail }
+```
+
+Rules:
+
+- Core-agnostic: `get_verification_provider` / `verify_with_provider` contain
+  no provider-specific command or config literals. All such knowledge lives
+  in `VerificationProvider` subclasses registered by name via
+  `register_verification_provider` (openvisio / pytest / npm / custom).
+- Graceful degradation: provider unknown, `can_verify` false, `verify`
+  returns non-pass status, or provider raises — all collapse to an
+  `unavailable` verdict. Core proceeds on the evidence gate and never crashes.
+- Swap-ability: tests and custom setups register fake providers by name
+  without touching core code.
+
 ## 26.26 Core vs Observability Separation (fix.md §17 — P2)
 
 ```text
@@ -1581,6 +1716,8 @@ OBSERVABILITY: tool calls, metrics, dashboard, history, inventory, trends
 ```
 
 Manager emits events; Observability reads events — no dashboard logic inside orchestration.
+Boundary is events-only: core writes events.jsonl/tool-calls.jsonl; observability reads them; core never imports observability modules nor reads/writes metrics.json.
+Failure-isolation: observability failure never blocks core orchestration; core log_dispatch/verify_completion/build_recovery_plan succeed with observability modules unimportable.
 
 ## 26.27 Test Matrix T11-T22 (fix.md §21) — plus Implementation Order
 
@@ -1649,18 +1786,33 @@ File: `.agent/manager/tool-calls.jsonl` (runtime — gitignored, never enters gi
 | `prompt_hash` | string | first 12 hex chars of prompt sha256 — never store secrets/full prompts |
 | `tokens_in` / `tokens_out` | integer/`null` | filled by the caller when known (e.g. from an API response), no default |
 
+### Tool-call lifecycle (FIX-V2-23)
+
+States (4): `STARTED`, `COMPLETED`, `FAILED`, `UNKNOWN`.
+- Transitions: `STARTED→COMPLETED` on normal finish via `record_lifecycle`; `STARTED→FAILED` only on explicit error evidence; `STARTED→UNKNOWN` only via `reconcile_tool_calls` (restart-reconcile) when no matching completion/result found.
+- Every tool-call row carries `tool_call_id` (uuid4 hex) + `lifecycle` (one of the 4 states); `status` retained for compat.
+- Restart-reconcile: on restart, scan `tool-calls.jsonl` for rows with `lifecycle=STARTED`; with matching completion event → close as `COMPLETED` (or `FAILED` if error evidence), without match → close as `UNKNOWN`.
+- Missing result → `UNKNOWN`, never `FAILED` (FAILED requires explicit error).
+
 ### 6 Metrics + formulas (`scripts/metrics.py --rebuild`)
 
 Reads `events.jsonl` + `tool-calls.jsonl` and computes per task (re-runnable with identical results = idempotent):
 
 | Metric | Formula |
 |---|---|
-| `sessions_per_task` | count `WORKER_STARTED` / `WORKER_RESUMED` per task |
+| `sessions_per_task` | count `WORKER_STARTED` per task (legacy alias of `worker_sessions_created`) |
 | `tool_calls_per_task` | count non-denied `tool-calls.jsonl` rows per task |
 | `recovery_count` | count `RECOVERY_STARTED` per task |
 | `review_loop` | count `REVIEW_FAILED` per task — over `max_review_cycles=3` in `config.json` → `BLOCKED` |
 | `time_to_DONE` | `TASK_DONE.time − TASK_CREATED.time` (seconds, `null` when absent) |
 | `success_rate` | `DONE / (DONE + failed + cancelled)` overall (0–1) |
+
+Session/recovery/review split semantics (FIX-V2-24): `worker_sessions_created` counts
+`WORKER_STARTED` only; `worker_session_resumes` counts `WORKER_RESUMED` only;
+`worker_recoveries` counts `RECOVERY_STARTED` only; `review_cycles` counts
+`REVIEW_FAILED` only. Counting rules: one event row = one count, per task, `TEST-*`/`DEP-*`
+excluded; a resume never creates a session (`WORKER_RESUMED` never increments
+`worker_sessions_created`/`sessions_per_task`) — a resume is NEVER a new session.
 
 Plus (added later, same rebuild): `denied_attempts`, `recovery_tokens`, `review_passed`,
 efficiency block (token/tools per success, recovery cost, session efficiency, review
@@ -1766,3 +1918,159 @@ Roadmap P0+P1+P2 is done (only overnight 1M/10M bench runs remain):
 - `test_logging.py` 22 tests + `test_upgrade.py` 7 tests green in all 3 projects
   (Agent/mcp/Dashboard hash-synced)
 
+## 26.31 Routing Boundary (fix-v2 §18 — FIX-V2-17)
+
+Building owns production code. Ownership is exclusive per task type.
+
+### Ownership matrix
+
+| Task type | Owner | Others |
+|---|---|---|
+| design (architecture planning, design changes, design structure) | planning | building / error_debug / review must not own |
+| code (production implementation, normal coding, implementation fixes) | building | planning / error_debug / review must not own |
+| classify (root-cause analysis, investigation, complex diagnosis) | error_debug | must not become second production implementation unless task policy explicitly authorizes |
+| review (implementation / regression / security review, quality findings) | review | reviews only, never edits files |
+
+### Violation examples
+
+- V1: design task dispatched to building — BLOCKED (design structure owned by planning).
+- V2: code task dispatched to error_debug — BLOCKED (error_debug is root-cause only, never second implementation).
+- V3: code task dispatched to review — BLOCKED (review owns quality, never edits).
+- V4: review task dispatched to building — BLOCKED (quality owned by review).
+- V5: classify task dispatched to building — BLOCKED (diagnosis owned by error_debug).
+
+### Routing table reference
+
+- Source of truth for enforcement: `ROUTING_OWNERSHIP` in `scripts/manager.py`.
+- Check function: `check_routing(task_type, agent)` returns ALLOW on owner match,
+  BLOCKED with reason on misroute, WARNING on unknown task type (compat).
+- Dispatch path: `log_dispatch(..., task_type=None)` resolves task type from the
+  explicit argument or the task manifest, calls `check_routing`, logs a `ROUTING`
+  event on misroute and proceeds (warn, not hard-fail) to preserve compat.
+
+## 26.32 P0 Tests Gate (FIX-V2-27)
+
+- P0 suite: `T02/T03/T04/T05/T08/T11-T17` — must be green before any recovery proceeds.
+- Gate-first: `execute_recovery` calls `check_p0_gate()` as the first step, before policy/classify/building.
+- Record source: `state["p0_last_result"]` (`{passed: bool, at: now-UTC-ISO}`), fallback to `STATE_FILE` on disk.
+- Red / missing / stale / invalid-timestamp → return `{"status": "blocked", "reason": "P0_RED", "detail": ...}` (BLOCKED) + manual path (human must re-run P0 suite and refresh the record, never real lock, never auto-unblock).
+
+## 26.33 Reliability Metrics (FIX-V2-25)
+
+- Reliability first: the 6 reliability metrics outrank efficiency metrics
+  (`task_efficiency`, `token_per_success`, `tools_per_success`,
+  `recovery_cost_ratio`, `session_efficiency`, `review_rework_rate`).
+  A green efficiency number never overrides a red reliability signal.
+- All 6 are computed from the event log only (`events.jsonl`), never from
+  tool-call contents: per-task booleans roll up into `totals`, and
+  `rebuild()` exposes the same 6 under the `reliability` payload key.
+  `compute_metrics` arity is unchanged (still returns 4 values).
+- Definitions:
+  1. `recovery_success_rate` = tasks with `recovered_then_done` /
+     tasks with recovery (`recovery_count > 0`), else `None` on no recovery.
+     Per-task `recovered_then_done` = `RECOVERY_STARTED` seen and `TASK_DONE` seen.
+  2. `false_done_count` = tasks where `TASK_DONE` exists without
+     `VERIFYING_SUCCESS` (per-task `false_done`).
+  3. `duplicate_worker_count` = tasks with more than one `WORKER_STARTED`
+     (per-task `duplicate_worker` = `sessions_created > 1`).
+  4. `data_loss_count` = tasks where a `TASK_BLOCKED` carrying
+     `files_touched` has no later `TASK_DONE` / `TASK_UNBLOCKED` /
+     `RECOVERY_RESOLVED` (per-task `data_loss`).
+  5. `unresolved_count` = tasks whose last `TASK_BLOCKED` / `TASK_FAILED`
+     sits after the last `TASK_DONE` / `TASK_UNBLOCKED` /
+     `RECOVERY_RESOLVED` (per-task `unresolved`).
+  6. `completion_rate` = `done` / `len(per_task)` (`0.0` on empty).
+
+
+## 26.34 Capability Matrix (FIX-V2-20)
+
+Scope: fix-v2 §21 — verify what the session lifecycle can actually do
+before building the full controller. Rows are lifecycle capabilities;
+columns are Available / Interface / Reliable. Status is honest:
+cells marked with gaps were observed during this fix-v2 run.
+
+| Capability | Available | Interface | Reliable | Evidence + status |
+|---|---|---|---|---|
+| create | yes | `log_dispatch` | partial | WORKER_STARTED event + DISPATCH tool-call record per dispatch. Gap: record-only, no live process-handle check, worker death is inferred later via watchdog, not at create time. Status: USABLE_WITH_GAP |
+| discover | no | none | no | No session-listing API exists in this repo; controller sees only queue/state/checkpoint files. Live OpenCode session enumeration was never demonstrated in this run. Status: GAP — controller must not assume it can find sessions |
+| resume | yes | `generate_resume_context` | partial | Resume context builder + checkpoint file round-trip. Gap: quality depends on worker-written checkpoint; stale checkpoints fall back to classify. Status: USABLE_WITH_GAP |
+| recover | yes | `recover_from_hierarchy` | partial | Recovery hierarchy + `build_recovery_plan`; unknown modes degrade to CLASSIFY_ONLY. Gap: novel failure modes still need human triage. Status: USABLE_WITH_GAP |
+| verify | yes | `verify_with_provider` | partial | VerificationProvider abstraction + `verify_completion` evidence gate. Gap: provider-dependent; TASK_DONE without VERIFYING_SUCCESS is counted as false_done rather than prevented. Status: USABLE_WITH_GAP |
+| review | yes | `save_review` | partial | Review record persists status + findings. Gap: quality judgment is owned by the review agent; controller only records, never grades. Status: USABLE_WITH_GAP |
+| lease | yes | `verify_lease_fencing` | yes (single-host) | Fenced dispatch aborts stale holders with StaleLeaseError; file-lease round-trips green in suite. Limit: single-host file lease, no distributed fencing. Status: OK |
+| reconcile | yes | `reconcile_state` | partial | `reconcile_state` + `reconcile_tool_calls` map STARTED-only calls to UNKNOWN instead of assuming failure. Gap: UNKNOWN outcomes still need triangulation or human call. Status: USABLE_WITH_GAP |
+
+Mapping to fix-v2 §21 original rows: Create session -> create; Send prompt / Read output -> create (prompt_text + tool-call record, same gap as create); Get session status -> discover (GAP); Detect tool limit -> reconcile (partial, via lifecycle + threshold); Detect process death -> create/watchdog (partial, inferred not detected); Resume -> resume; Terminate session -> GAP (no terminate interface exists; stale leases are fenced, sessions are never killed by the controller).
+
+Enforcement: `CAPABILITY_MATRIX` in `scripts/manager.py` mirrors this table; `get_capability(name)` reads one cell; `guard_capability(name)` is the consult gate — unknown or unavailable returns SKIP with reason, never raises. `log_dispatch` consults `create` first and returns a skipped dict instead of dispatching when unavailable.
+
+
+## 26.35 Invariant-Structure for Hardening Cases (FIX-V2-26)
+
+Scope: all existing test_Txx_ methods in scripts/test_hardening.py.
+Every T-case docstring MUST carry the same 4-heading block so intent
+and invariants are reviewable without reading the body.
+
+Template (1-2 lines per heading, docstrings only, no logic change):
+
+    GIVEN: <isolated precondition: tmp queue/state/checkpoint/operations/events/lock>
+    WHEN: <action under test: startup_recovery / hierarchy / reconcile / lock / classify / verify / watchdog>
+    THEN: <assertion: expected status string / flag / bounded plan>
+    EXPECTED INVARIANTS: <tmp-only; real files and real lock untouched; deterministic/idempotent>
+
+Every-T-case rule: each test_Txx_ method keeps its original first-line
+summary, then adds the 4 headings above; a meta-test using
+inspect.getdoc over all test_Txx_ methods asserts all 4 headings are
+present and fails listing offenders. Suite stays green via repo-root
+`python -m unittest discover -s scripts -p "test_*.py"`. Never take a
+real lock; never touch real queue/state/checkpoint files.
+
+## FIX-V2-28 MVP boundary (dispatch focus)
+
+Advanced-out (never in manager core): parallel / distributed / discord /
+routing / rollback / dashboard / benchmark / planning.
+Core allowlist (stdlib-only): os, json, time, hashlib, subprocess, uuid,
+datetime — locked by `assert_mvp_boundary()` scanning own import lines at
+import time and raising `ImportError` on violation.
+Focus: tool-limit recovery loop only — dispatch + recover + verify survive
+stub-raise; tmp-isolated tests; never real lock.
+
+## Phase0-5 Roadmap (FIX-V2-29)
+
+Scope: fix-v2 §30 — one primary roadmap (Phase 0-5). Legacy sets below
+are DONE checklists only, not competing roadmaps; their content is not
+duplicated here.
+
+### Phase 0 — OpenCode Capability Validation
+
+Verify session lifecycle capabilities (fix-v2 §21 capability matrix).
+
+### Phase 1 — Recovery Foundation
+
+Watchdog, Recovery, Event System, Operation records, Lease/lock,
+State reconciliation.
+
+### Phase 2 — Safe Orchestration
+
+Queue, Context Manager, Policy, Budget, Approval.
+
+### Phase 3 — Verification
+
+Review, VERIFYING, Evidence, Verification Providers.
+
+### Phase 4 — Observability
+
+Logging, Metrics, Dashboard.
+
+### Phase 5 — Advanced Automation
+
+Parallel workers, Git automation, Discord, Scheduled/background work.
+Out of MVP core (see FIX-V2-28 boundary).
+
+### Legacy mapping (checklists — DONE, no duplication)
+
+- [x] Phase 1-6 / Phase1-6 DONE → folded into Phase 0-5 above.
+- [x] U1-U7 DONE → U1-U3 in Phase 1, U4-U7 in Phase 2.
+- [x] P0-P2 / P0/P1/P2 DONE → P0 in Phase 1, P1 in Phase 2-3, P2 in Phase 5.
+- [x] FIX-1–FIX-5 / FIX-1-5 DONE → implementation checklists under Phase 1-3.
+- [x] FIX-V2-01–29 / FIX-V2-01-29 DONE → Phase 0 (FIX-V2-20), Phase 1 (FIX-V2-12/13/14/18/19), Phase 2 (FIX-V2-28), Phase 3 (FIX-V2-11/17/21/27), Phase 4 (FIX-V2-22/23/24/25).

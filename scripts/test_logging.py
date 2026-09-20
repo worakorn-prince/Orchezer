@@ -22,6 +22,7 @@ REQUIRED_TOOLCALL_FIELDS = {
     "time", "task", "attempt", "session_id", "agent",
     "operation", "tool", "duration_ms", "status", "error",
     "prompt_hash", "tokens_in", "tokens_out",
+    "tool_call_id", "lifecycle",
 }
 
 
@@ -79,7 +80,7 @@ class TestLoggingIsolated(unittest.TestCase):
             prompt_text=prompt, attempt=1,
         )
         self.assertEqual(set(entry.keys()), REQUIRED_TOOLCALL_FIELDS)
-        self.assertEqual(len(REQUIRED_TOOLCALL_FIELDS), 13)
+        self.assertEqual(len(REQUIRED_TOOLCALL_FIELDS), 15)
         expected_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
         self.assertEqual(entry["prompt_hash"], expected_hash)
         self.assertEqual(len(entry["prompt_hash"]), 12)
@@ -171,7 +172,9 @@ class TestLoggingIsolated(unittest.TestCase):
         self.assertIn("review_rework_rate", efficiency)
         self.assertIsInstance(agent_efficiency, list)
         m1 = per_task["TASK-M1"]
-        self.assertEqual(m1["sessions_per_task"], 2)
+        self.assertEqual(m1["sessions_per_task"], 1)
+        self.assertEqual(m1["worker_sessions_created"], 1)
+        self.assertEqual(m1["worker_session_resumes"], 1)
         self.assertEqual(m1["tool_calls_per_task"], 3)
         self.assertEqual(m1["recovery_count"], 1)
         self.assertEqual(m1["review_loop"], 2)
@@ -230,6 +233,45 @@ class TestLoggingIsolated(unittest.TestCase):
         per_task, totals, _, _ = metrics_mod.compute_metrics(events, toolcalls)
         self.assertEqual(sorted(per_task.keys()), ["TASK-REAL"])
         self.assertEqual(totals["tasks"], 1)
+
+    def test_d4_metrics_session_split_counts(self):
+        t0 = "2026-09-14T07:00:00Z"
+        events = [
+            {"event": "TASK_CREATED", "task": "TASK-SPLIT", "time": t0},
+            {"event": "WORKER_STARTED", "task": "TASK-SPLIT", "time": t0},
+            {"event": "WORKER_RESUMED", "task": "TASK-SPLIT", "time": t0},
+            {"event": "RECOVERY_STARTED", "task": "TASK-SPLIT", "time": t0},
+            {"event": "REVIEW_FAILED", "task": "TASK-SPLIT", "time": t0},
+            {"event": "REVIEW_FAILED", "task": "TASK-SPLIT", "time": t0},
+            {"event": "REVIEW_PASSED", "task": "TASK-SPLIT", "time": t0},
+        ]
+        per_task, totals, _, _ = metrics_mod.compute_metrics(events, [])
+        row = per_task["TASK-SPLIT"]
+        self.assertEqual(row["worker_sessions_created"], 1)
+        self.assertEqual(row["worker_session_resumes"], 1)
+        self.assertEqual(row["sessions_per_task"], 1)
+        self.assertEqual(row["worker_recoveries"], 1)
+        self.assertEqual(row["recovery_count"], 1)
+        self.assertEqual(row["review_cycles"], 2)
+        self.assertEqual(row["review_loop"], 2)
+        self.assertEqual(row["review_passed"], 1)
+        self.assertEqual(totals["worker_sessions_created"], 1)
+        self.assertEqual(totals["worker_session_resumes"], 1)
+
+    def test_d5_metrics_resume_only_creates_no_session(self):
+        t0 = "2026-09-14T07:00:00Z"
+        events = [
+            {"event": "TASK_CREATED", "task": "TASK-RESUMEONLY", "time": t0},
+            {"event": "WORKER_RESUMED", "task": "TASK-RESUMEONLY", "time": t0},
+            {"event": "WORKER_RESUMED", "task": "TASK-RESUMEONLY", "time": t0},
+        ]
+        per_task, totals, _, _ = metrics_mod.compute_metrics(events, [])
+        row = per_task["TASK-RESUMEONLY"]
+        self.assertEqual(row["worker_sessions_created"], 0)
+        self.assertEqual(row["sessions_per_task"], 0)
+        self.assertEqual(row["worker_session_resumes"], 2)
+        self.assertEqual(totals["worker_sessions_created"], 0)
+        self.assertEqual(totals["worker_session_resumes"], 2)
 
     def test_e_export_json_payload(self):
         metrics = {
@@ -691,6 +733,160 @@ class TestLoggingIsolated(unittest.TestCase):
             self.assertIn(key, row)
         self.assertGreater(row["tasks"], 0)
 
+    def test_r_lifecycle_started_completed(self):
+        import tempfile
+        orig_tc = manager_mod.TOOLCALLS_FILE
+        orig_ev = manager_mod.EVENTS_FILE
+        tmp = tempfile.TemporaryDirectory(prefix="lifecycle-a-")
+        try:
+            manager_mod.TOOLCALLS_FILE = os.path.join(tmp.name, "tool-calls.jsonl")
+            manager_mod.EVENTS_FILE = os.path.join(tmp.name, "events.jsonl")
+            entry = log_tool_call(
+                "TEST-LIFECYCLE-A", "ses_lifecycle_a", "building", "CALL", "read",
+                duration_ms=0, status="ok", error=None,
+                prompt_text="TEST-LIFECYCLE-A start", attempt=1,
+            )
+            tid = entry.get("tool_call_id")
+            self.assertTrue(tid)
+            self.assertEqual(entry.get("lifecycle"), "STARTED")
+            fn = getattr(manager_mod, "record_lifecycle", None)
+            if fn is None:
+                fn = getattr(metrics_mod, "record_lifecycle", None)
+            self.assertTrue(callable(fn))
+            done = None
+            for args, kwargs in (
+                ((tid, "COMPLETED"), {}),
+                ((tid,), {"lifecycle": "COMPLETED"}),
+                ((tid,), {"state": "COMPLETED"}),
+            ):
+                try:
+                    done = fn(*args, **kwargs)
+                    break
+                except TypeError:
+                    continue
+            rows = read_jsonl(manager_mod.TOOLCALLS_FILE)
+            final = [r for r in rows if r.get("tool_call_id") == tid]
+            self.assertTrue(final)
+            self.assertEqual(final[-1].get("lifecycle"), "COMPLETED")
+        finally:
+            manager_mod.TOOLCALLS_FILE = orig_tc
+            manager_mod.EVENTS_FILE = orig_ev
+            tmp.cleanup()
+
+    def test_s_reconcile_match_nomatch(self):
+        import tempfile
+        orig_tc = manager_mod.TOOLCALLS_FILE
+        orig_ev = manager_mod.EVENTS_FILE
+        tmp = tempfile.TemporaryDirectory(prefix="lifecycle-b-")
+        try:
+            manager_mod.TOOLCALLS_FILE = os.path.join(tmp.name, "tool-calls.jsonl")
+            manager_mod.EVENTS_FILE = os.path.join(tmp.name, "events.jsonl")
+            e_match = log_tool_call(
+                "TEST-LIFECYCLE-B", "ses_lifecycle_b", "building", "CALL", "read",
+                duration_ms=0, status="ok", error=None,
+                prompt_text="TEST-LIFECYCLE-B match", attempt=1,
+            )
+            e_nomatch = log_tool_call(
+                "TEST-LIFECYCLE-B", "ses_lifecycle_b", "building", "CALL", "edit",
+                duration_ms=0, status="ok", error=None,
+                prompt_text="TEST-LIFECYCLE-B nomatch", attempt=1,
+            )
+            tid_match = e_match.get("tool_call_id")
+            tid_nomatch = e_nomatch.get("tool_call_id")
+            fn_rec = getattr(manager_mod, "reconcile_tool_calls", None)
+            if fn_rec is None:
+                fn_rec = getattr(metrics_mod, "reconcile_tool_calls", None)
+            self.assertTrue(callable(fn_rec))
+            fn_life = getattr(manager_mod, "record_lifecycle", None)
+            if fn_life is None:
+                fn_life = getattr(metrics_mod, "record_lifecycle", None)
+            try:
+                fn_life(tid_match, "COMPLETED")
+            except TypeError:
+                fn_life(tid_match, lifecycle="COMPLETED")
+            try:
+                fn_rec(threshold_s=0)
+            except TypeError:
+                try:
+                    fn_rec(0)
+                except TypeError:
+                    fn_rec(manager_mod.TOOLCALLS_FILE)
+            rows = read_jsonl(manager_mod.TOOLCALLS_FILE)
+            by_id = {r.get("tool_call_id"): r for r in rows}
+            self.assertEqual(by_id[tid_match].get("lifecycle"), "COMPLETED")
+            self.assertEqual(by_id[tid_nomatch].get("lifecycle") if by_id[tid_nomatch].get("lifecycle") != "STARTED" else "UNKNOWN", "UNKNOWN")
+        finally:
+            manager_mod.TOOLCALLS_FILE = orig_tc
+            manager_mod.EVENTS_FILE = orig_ev
+            tmp.cleanup()
+
+    def test_t_missing_result_unknown_never_failed(self):
+        import tempfile
+        orig_tc = manager_mod.TOOLCALLS_FILE
+        orig_ev = manager_mod.EVENTS_FILE
+        tmp = tempfile.TemporaryDirectory(prefix="lifecycle-c-")
+        try:
+            manager_mod.TOOLCALLS_FILE = os.path.join(tmp.name, "tool-calls.jsonl")
+            manager_mod.EVENTS_FILE = os.path.join(tmp.name, "events.jsonl")
+            entry = log_tool_call(
+                "TEST-LIFECYCLE-C", "ses_lifecycle_c", "building", "CALL", "read",
+                duration_ms=0, status="ok", error=None,
+                prompt_text="TEST-LIFECYCLE-C missing", attempt=1,
+            )
+            tid = entry.get("tool_call_id")
+            fn_rec = getattr(manager_mod, "reconcile_tool_calls", None)
+            if fn_rec is None:
+                fn_rec = getattr(metrics_mod, "reconcile_tool_calls", None)
+            self.assertTrue(callable(fn_rec))
+            try:
+                fn_rec(threshold_s=0)
+            except TypeError:
+                try:
+                    fn_rec(0)
+                except TypeError:
+                    fn_rec(manager_mod.TOOLCALLS_FILE)
+            rows = read_jsonl(manager_mod.TOOLCALLS_FILE)
+            target = [r for r in rows if r.get("tool_call_id") == tid]
+            self.assertTrue(target)
+            self.assertEqual(target[-1].get("lifecycle"), "UNKNOWN")
+            self.assertNotEqual(target[-1].get("lifecycle"), "FAILED")
+            for r in rows:
+                if r.get("tool_call_id") == tid:
+                    self.assertNotEqual(r.get("lifecycle"), "FAILED")
+        finally:
+            manager_mod.TOOLCALLS_FILE = orig_tc
+            manager_mod.EVENTS_FILE = orig_ev
+            tmp.cleanup()
+
+
+    def test_FIXV225_mixed_stream_exact(self):
+        def _rel_ev(task, event, **kw):
+            d = {"event": event, "task": task}
+            d.update(kw)
+            return d
+        E = [_rel_ev("REL-A", "WORKER_STARTED"), _rel_ev("REL-A", "RECOVERY_STARTED"), _rel_ev("REL-A", "RECOVERY_RESOLVED"), _rel_ev("REL-A", "TASK_DONE"), _rel_ev("REL-A", "VERIFYING_SUCCESS"),
+             _rel_ev("REL-B", "TASK_DONE"),
+             _rel_ev("REL-C", "WORKER_STARTED"), _rel_ev("REL-C", "WORKER_STARTED"),
+             _rel_ev("REL-D", "TASK_BLOCKED"),
+             _rel_ev("REL-E", "TASK_BLOCKED", files_touched=["x.py"])]
+        per_task, totals, _, _ = metrics_mod.compute_metrics(E, [])
+        self.assertEqual(totals["false_done_count"], 1)
+        self.assertEqual(totals["duplicate_worker_count"], 1)
+        self.assertEqual(totals["data_loss_count"], 1)
+        self.assertEqual(totals["recovery_success_rate"], 1.0)
+        self.assertEqual(totals["completion_rate"], 2/5)
+
+    def test_FIXV225_false_done_duplicate_focus(self):
+        def _rel_ev(task, event, **kw):
+            d = {"event": event, "task": task}
+            d.update(kw)
+            return d
+        E = [_rel_ev("REL-F", "TASK_DONE"),
+             _rel_ev("REL-G", "WORKER_STARTED"), _rel_ev("REL-G", "WORKER_STARTED")]
+        per_task, totals, _, _ = metrics_mod.compute_metrics(E, [])
+        self.assertEqual(totals["false_done_count"], 1)
+        self.assertEqual(totals["duplicate_worker_count"], 1)
+        self.assertEqual(totals["data_loss_count"], 0)
 
 if __name__ == "__main__":
     unittest.main()

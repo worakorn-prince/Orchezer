@@ -320,3 +320,45 @@ class TestRequireVerification(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTaskContract(unittest.TestCase):
+    def test_contract_full_with_verification_ok(self):
+        import task_contract
+        contract = {
+            "id": "C1",
+            "objective": "ship feature",
+            "acceptance": ["done"],
+            "files": ["src/a.py"],
+            "verification": "pytest scripts/ -q",
+        }
+        ok, missing, level = task_contract.validate_contract(contract)
+        self.assertTrue(ok, missing)
+        self.assertEqual(missing, [])
+        self.assertIn(level, ("LOW", "MEDIUM", "HIGH"))
+
+    def test_contract_high_without_verification_not_ok(self):
+        import task_contract
+        contract = {
+            "id": "DBX",
+            "objective": "migrate db",
+            "acceptance": ["done"],
+            "files": ["db/migrate/001.sql"],
+        }
+        ok, missing, level = task_contract.validate_contract(contract)
+        self.assertEqual(level, "HIGH")
+        self.assertFalse(ok)
+        self.assertIn("verification", missing)
+
+    def test_contract_low_without_verification_ok(self):
+        import task_contract
+        contract = {
+            "id": "LOW1",
+            "objective": "fix typo",
+            "acceptance": ["done"],
+            "files": ["docs/guide.md"],
+        }
+        ok, missing, level = task_contract.validate_contract(contract)
+        self.assertEqual(level, "LOW")
+        self.assertTrue(ok, missing)
+        self.assertEqual(missing, [])

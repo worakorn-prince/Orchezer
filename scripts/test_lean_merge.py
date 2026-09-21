@@ -274,5 +274,27 @@ class TestFeedbackLoop(unittest.TestCase):
         self.assertEqual(feedback_loop.suggest(summary), [])
 
 
+class TestFailureKinds(unittest.TestCase):
+    def test_failure_limit_hit_token_limit_retryable_budget_two(self):
+        import failure_kinds
+        kind, retryable = failure_kinds.classify({"limit_hit": True})
+        self.assertEqual(kind, "TOKEN_LIMIT")
+        self.assertTrue(retryable)
+        self.assertEqual(failure_kinds.budget_for(kind), 2)
+
+    def test_failure_empty_signals_unknown_no_retry(self):
+        import failure_kinds
+        kind, retryable = failure_kinds.classify({})
+        self.assertEqual(kind, "UNKNOWN")
+        self.assertFalse(retryable)
+        self.assertFalse(failure_kinds.should_retry(kind, 0))
+
+    def test_failure_should_retry_exhausted_false(self):
+        import failure_kinds
+        self.assertFalse(failure_kinds.should_retry("TOKEN_LIMIT", 2))
+        self.assertFalse(failure_kinds.should_retry("MODEL_ERROR", 3))
+        self.assertFalse(failure_kinds.should_retry("UNKNOWN", 0))
+
+
 if __name__ == "__main__":
     unittest.main()

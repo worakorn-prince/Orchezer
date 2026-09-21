@@ -242,5 +242,37 @@ class TestLeanMerge(unittest.TestCase):
         self.assertTrue(reasons)
 
 
+class TestFeedbackLoop(unittest.TestCase):
+    def test_feedback_record_three_summarize_counts(self):
+        import feedback_loop
+        store = []
+        feedback_loop.record_event(store, {"task": "T1", "result": "PASS", "failure": "", "owns": ["a/x.py"]})
+        feedback_loop.record_event(store, {"task": "T2", "result": "FAIL", "failure": "TEST_FAIL", "owns": ["a/y.py"]})
+        feedback_loop.record_event(store, {"task": "T3", "result": "FAIL", "failure": "TEST_FAIL", "owns": ["b/z.py"]})
+        summary = feedback_loop.summarize(store)
+        self.assertEqual(summary["total"], 3)
+        self.assertEqual(summary["by_result"], {"PASS": 1, "FAIL": 2})
+        self.assertEqual(summary["by_failure"], {"TEST_FAIL": 2})
+        self.assertEqual(summary["top_zone"], "a")
+
+    def test_feedback_repeat_fail_suggests(self):
+        import feedback_loop
+        store = []
+        feedback_loop.record_event(store, {"task": "T1", "result": "FAIL", "failure": "TEST_FAIL", "owns": ["a/x.py"]})
+        feedback_loop.record_event(store, {"task": "T2", "result": "FAIL", "failure": "TEST_FAIL", "owns": ["a/y.py"]})
+        summary = feedback_loop.summarize(store)
+        tips = feedback_loop.suggest(summary)
+        self.assertTrue(tips)
+        self.assertTrue(any("TEST_FAIL" in str(t) for t in tips))
+
+    def test_feedback_empty_store_empty_summary(self):
+        import feedback_loop
+        summary = feedback_loop.summarize([])
+        self.assertEqual(summary["total"], 0)
+        self.assertEqual(summary["by_result"], {})
+        self.assertEqual(summary["by_failure"], {})
+        self.assertEqual(feedback_loop.suggest(summary), [])
+
+
 if __name__ == "__main__":
     unittest.main()

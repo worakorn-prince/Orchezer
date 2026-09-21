@@ -55,3 +55,27 @@ def valid_report(rep) -> bool:
     if rep.get("verdict") not in ("PASS", "FAIL"):
         return False
     return True
+
+
+def _nonempty_value(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict, set, tuple)):
+        return len(value) > 0
+    return bool(value)
+
+
+def require_verification(contract):
+    if not isinstance(contract, dict):
+        return (False, ["verification"])
+    if _nonempty_value(contract.get("verification")):
+        return (True, [])
+    acceptance_ok = _nonempty_value(contract.get("acceptance"))
+    review_ok = _nonempty_value(contract.get("review"))
+    if acceptance_ok and review_ok:
+        return (True, [])
+    if not acceptance_ok and not review_ok:
+        return (False, ["acceptance", "review"])
+    return (False, ["verification"])

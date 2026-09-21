@@ -296,5 +296,27 @@ class TestFailureKinds(unittest.TestCase):
         self.assertFalse(failure_kinds.should_retry("UNKNOWN", 0))
 
 
+class TestRequireVerification(unittest.TestCase):
+    def test_verification_string_ok(self):
+        import verify_report
+        ok, missing = verify_report.require_verification({"verification": "pytest scripts/ -q"})
+        self.assertTrue(ok)
+        self.assertEqual(missing, [])
+
+    def test_empty_contract_not_ok(self):
+        import verify_report
+        ok, missing = verify_report.require_verification({})
+        self.assertFalse(ok)
+        self.assertTrue(missing)
+
+    def test_acceptance_review_without_verification_ok(self):
+        import verify_report
+        ok, missing = verify_report.require_verification(
+            {"acceptance": ["done"], "review": {"status": "PASS"}}
+        )
+        self.assertTrue(ok)
+        self.assertEqual(missing, [])
+
+
 if __name__ == "__main__":
     unittest.main()

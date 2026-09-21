@@ -27,3 +27,27 @@ scripts/e2e-openvisio.ps1
 scripts/run_completion.py
 fix-v2.md
 sys_review.md
+
+# Agent-orchestration internals — local only; GitHub publishes Scopeboard viewer only
+baseline-report.json
+implementation-plan.md
+docs/llm-telemetry-design.md
+docs/ownership-policy.md
+.mcp.json
+scripts/batch_seq.py
+scripts/collect_baseline.py
+scripts/confidence_tags.py
+scripts/ctx_cache.py
+scripts/ctx_compiler.py
+scripts/dag_waves.py
+scripts/failure_kinds.py
+scripts/feedback_loop.py
+scripts/lean_flow.py
+scripts/task_contract.py
+scripts/task_levels.py
+scripts/telemetry_collect.py
+scripts/verify_report.py
+scripts/worker_choice.py
+scripts/test_lean_merge.py
+scripts/test_hardening.py
+scripts/test_upgrade.py

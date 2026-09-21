@@ -1,0 +1,129 @@
+{
+  "generated_at": "2026-09-21T14:17:57.873184+00:00",
+  "commit": "185d719",
+  "execution": {
+    "suite_seconds": 13.626,
+    "passed": 127,
+    "failed": 0,
+    "success_rate": 1.0,
+    "bench_max_ms": 26.207,
+    "bench_median_ms": 4.161,
+    "bench_rows": [
+      {
+        "tasks": 100,
+        "workers": 1,
+        "validate_ms": 0.27,
+        "waves_ms": 0.527,
+        "assign_ms": 0.381,
+        "waves": 5,
+        "batches": 100,
+        "conflicts": 0
+      },
+      {
+        "tasks": 100,
+        "workers": 3,
+        "validate_ms": 0.268,
+        "waves_ms": 0.439,
+        "assign_ms": 1.107,
+        "waves": 5,
+        "batches": 35,
+        "conflicts": 0
+      },
+      {
+        "tasks": 100,
+        "workers": 5,
+        "validate_ms": 0.285,
+        "waves_ms": 0.54,
+        "assign_ms": 2.45,
+        "waves": 5,
+        "batches": 20,
+        "conflicts": 0
+      },
+      {
+        "tasks": 300,
+        "workers": 1,
+        "validate_ms": 0.841,
+        "waves_ms": 1.263,
+        "assign_ms": 1.987,
+        "waves": 5,
+        "batches": 300,
+        "conflicts": 0
+      },
+      {
+        "tasks": 300,
+        "workers": 3,
+        "validate_ms": 0.852,
+        "waves_ms": 1.614,
+        "assign_ms": 4.161,
+        "waves": 5,
+        "batches": 100,
+        "conflicts": 0
+      },
+      {
+        "tasks": 300,
+        "workers": 5,
+        "validate_ms": 0.752,
+        "waves_ms": 1.285,
+        "assign_ms": 4.847,
+        "waves": 5,
+        "batches": 60,
+        "conflicts": 0
+      },
+      {
+        "tasks": 1000,
+        "workers": 1,
+        "validate_ms": 3.299,
+        "waves_ms": 5.231,
+        "assign_ms": 15.719,
+        "waves": 5,
+        "batches": 1000,
+        "conflicts": 0
+      },
+      {
+        "tasks": 1000,
+        "workers": 3,
+        "validate_ms": 2.25,
+        "waves_ms": 3.155,
+        "assign_ms": 12.976,
+        "waves": 5,
+        "batches": 335,
+        "conflicts": 0
+      },
+      {
+        "tasks": 1000,
+        "workers": 5,
+        "validate_ms": 2.314,
+        "waves_ms": 3.284,
+        "assign_ms": 26.207,
+        "waves": 5,
+        "batches": 200,
+        "conflicts": 0
+      }
+    ],
+    "queue_terminal": 84,
+    "queue_counts": {
+      "completed": 83,
+      "cancelled": 1,
+      "total": 85
+    },
+    "suite_returncode": 0,
+    "scale_returncode": 0
+  },
+  "llm": {
+    "status": "UNKNOWN",
+    "reason": "no live LLM telemetry in repo",
+    "collection_method": "reviewed repo for live LLM call/token/latency telemetry (total calls, input/output tokens, latency); no live source found so no values recorded; marked UNKNOWN per New-Architecture-v1 section 4 and left for the investigate step",
+    "metrics": {
+      "total_calls": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "total_tokens": null,
+      "latency": null
+    }
+  },
+  "confidence": {
+    "execution": "VERIFIED",
+    "llm": "UNKNOWN",
+    "note": "execution numbers measured live in this run; llm values absent (UNKNOWN must be investigated; ASSUMED != VERIFIED per section 4)"
+  }
+}

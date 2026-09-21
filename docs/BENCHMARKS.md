@@ -47,3 +47,12 @@ first — JSONL stays canonical until numbers say otherwise.
 python scripts/bench.py --calls 10000
 python -m unittest discover -s scripts -p "test_logging.py"   # 21 tests incl. scale smoke
 ```
+
+## Scheduler + telemetry benchmarks
+
+เบนช์ CU-09B: 100/300/1000 ทาสก์ × เวิร์กเกอร์ 1/3/5 เคสหนักสุด ~16ms
+คอขวดคือ assign (~75% ที่ N=1000) สเกลตามทาสก์ ไม่ใช่เวิร์กเกอร์
+เทเลเมทรี A: 4 แถว manual (เบสไลน์ก่อนมี collector)
+เทเลเมทรี B: collector อ่านอย่างเดียว ไม่แตะงานผู้ใช้
+เทเลเมทรี C: gate ต่อเบสไลน์ก่อนผ่าน
+ดูผลเต็มใน `.agent/manager/tasks/CU-09B/results.md`

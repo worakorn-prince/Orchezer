@@ -26,10 +26,10 @@ python scripts/aggregate.py           # → dashboard/all-projects.json (combine
 python -m http.server                 # open dashboard/*.html over http (do not open file:// directly, fetch gets blocked)
 ```
 
-Run the test suite (46 tests, stdlib `unittest`, no installs):
+Run the test suite (161 tests: `test_logging` 29 + `test_hardening` 78 + `test_upgrade` 10 + `test_lean_merge` 44):
 
 ```powershell
-python -m unittest discover -s scripts -p "test_*.py"
+pytest scripts/ -q   # or: python -m unittest discover -s scripts -p "test_*.py" (stdlib, no installs)
 ```
 
 ## Log schema (the only contract to follow)
@@ -72,13 +72,25 @@ scripts/
   observability.py   # manager contract → .agent/manager/observability.json (schema v1)
   failure.py         # failure taxonomy + recovery analytics
   bench.py           # synthetic benchmarks (see docs/BENCHMARKS.md)
-  bootstrap.py       # init .agent/ skeleton (+ --demo sample data)
-  test_logging.py    # 22 tests (schema + metrics + views)
+   bootstrap.py       # init .agent/ skeleton (+ --demo sample data)
+   test_logging.py    # 29 tests (schema + metrics + views)
+   test_hardening.py  # 78 tests (crash/recovery/lock/idempotent/user-guard)
+   test_upgrade.py    # 10 tests (watchdog + recovery + queue)
+   test_lean_merge.py # 44 tests (14 lean modules merge)
+   # 14 lean modules (pure, no I/O side effects):
+   lean_flow.py / task_levels.py / task_contract.py / dag_waves.py
+   batch_seq.py / worker_choice.py / ctx_cache.py / ctx_compiler.py
+   confidence_tags.py / verify_report.py / feedback_loop.py
+   failure_kinds.py / export_report.py / telemetry_collect.py
 dashboard/
-  index.html         # single-project view (5 charts + 17 tables)
-  all.html           # cross-project view (6 charts + 20 tables)
+   index.html         # single-project view (5 charts + 17 tables)
+   all.html           # cross-project view (6 charts + 20 tables)
 docs/
-  BENCHMARKS.md      # measured numbers + how to reproduce
+   BENCHMARKS.md           # measured numbers + how to reproduce
+   llm-telemetry-design.md # LLM telemetry: 4 rows → collector → gate
+   ownership-policy.md     # file ownership + local-only rules
+# root docs (spec + plan + baseline):
+# design.md / implementation-plan.md / baseline-report.json
 ```
 
 ## Tool permission tables (optional)

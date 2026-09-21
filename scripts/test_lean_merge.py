@@ -105,6 +105,25 @@ class TestLeanMerge(unittest.TestCase):
     def test_mvp_boundary_still_passes(self):
         manager_mod.assert_mvp_boundary()
 
+    def test_assign_same_zone_no_capacity_skips(self):
+        tasks = [
+            {"id": "S%d" % i, "title": "s", "owns": ["src/same/mod.py"], "dependencies": [], "status": "pending"}
+            for i in range(3)
+        ]
+        plan = dag_waves.assign(tasks, capacity_hint=10)
+        self.assertEqual(len(plan["batches"]), 3)
+        self.assertTrue(plan["conflicts"])
+        self.assertEqual(plan["capacity_skips"], 0)
+
+    def test_assign_capacity_bound_counts_skips(self):
+        tasks = [
+            {"id": "T%02d" % i, "title": "t", "owns": ["src/zone-%02d/mod.py" % (i % 10)], "dependencies": [], "status": "pending"}
+            for i in range(20)
+        ]
+        plan = dag_waves.assign(tasks, capacity_hint=5)
+        self.assertEqual(len(plan["batches"]), 4)
+        self.assertGreater(plan["capacity_skips"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

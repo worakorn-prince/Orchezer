@@ -117,10 +117,13 @@ def assign(tasks, wave=None, capacity_hint=None):
     limit = capacity_hint if isinstance(capacity_hint, int) and capacity_hint > 0 else None
     batches = []
     conflicts = []
+    # pigeonhole (tight): owns-conflict เกิดได้เฉพาะเมื่อ capacity_hint > distinct owns-zone ในเวฟ ไม่ใช่ >= ขนาดเวฟ
+    capacity_skips = 0
     for t in ordered:
         placed = False
         for batch in batches:
             if limit is not None and len(batch) >= limit:
+                capacity_skips += 1
                 continue
             hit = None
             for member in batch:
@@ -139,7 +142,8 @@ def assign(tasks, wave=None, capacity_hint=None):
     plan = {
         "batches": [[m.get("id", "") for m in b] for b in batches],
         "conflicts": sorted(conflicts),
-        "reason": "wave of %d split into %d conflict-free batches; %d conflict pairs"
-        % (len(ordered), len(batches), len(conflicts)),
+        "capacity_skips": capacity_skips,
+        "reason": "wave of %d split into %d conflict-free batches; %d conflict pairs; %d capacity skips"
+        % (len(ordered), len(batches), len(conflicts), capacity_skips),
     }
     return plan

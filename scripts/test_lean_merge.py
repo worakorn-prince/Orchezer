@@ -220,6 +220,27 @@ class TestLeanMerge(unittest.TestCase):
         broken.pop("tests")
         self.assertFalse(verify_report.valid_report(broken))
 
+    def test_choice_single_task_single(self):
+        import worker_choice
+        n, reasons = worker_choice.choose_workers(1)
+        self.assertEqual(n, 1)
+        self.assertTrue(reasons)
+
+    def test_choice_many_tasks_scales_five(self):
+        import worker_choice
+        n, reasons = worker_choice.choose_workers(
+            20, conflict_pairs=0, token_budget={"remaining": 80, "total": 100})
+        self.assertEqual(n, 5)
+        self.assertTrue(reasons)
+
+    def test_choice_many_tasks_clash_not_five(self):
+        import worker_choice
+        n, reasons = worker_choice.choose_workers(
+            20, conflict_pairs=3, token_budget={"remaining": 80, "total": 100})
+        self.assertIn(n, (1, 3))
+        self.assertNotEqual(n, 5)
+        self.assertTrue(reasons)
+
 
 if __name__ == "__main__":
     unittest.main()

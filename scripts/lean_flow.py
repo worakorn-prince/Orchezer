@@ -12,6 +12,7 @@ PACKAGE_FIELDS = (
 
 
 def _compiler():
+    # absolute package first, top-level fallback for direct script run
     try:
         from scripts import ctx_compiler as mod
         return mod
@@ -21,6 +22,7 @@ def _compiler():
 
 
 def _scheduler():
+    # absolute package first, top-level fallback for direct script run
     try:
         from scripts import dag_waves as mod
         return mod

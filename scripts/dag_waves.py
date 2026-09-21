@@ -117,7 +117,7 @@ def assign(tasks, wave=None, capacity_hint=None):
     limit = capacity_hint if isinstance(capacity_hint, int) and capacity_hint > 0 else None
     batches = []
     conflicts = []
-    # pigeonhole (tight): owns-conflict เกิดได้เฉพาะเมื่อ capacity_hint > distinct owns-zone ในเวฟ ไม่ใช่ >= ขนาดเวฟ
+    # pigeonhole (tight): บังคับเกิดชนเมื่อ capacity_hint > distinct owns-zone ในเวฟ ไม่ใช่ >= ขนาดเวฟ
     capacity_skips = 0
     for t in ordered:
         placed = False

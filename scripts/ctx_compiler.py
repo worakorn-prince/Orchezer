@@ -150,8 +150,6 @@ def validate_completeness(pkg):
             missing.append("Task.id")
         if not task.get("acceptance"):
             missing.append("Task.acceptance")
-    if "Task.acceptance" in missing and "Task" in missing:
-        missing = [m for m in missing if m != "Task.acceptance"]
     return (len(missing) == 0, missing)
 
 

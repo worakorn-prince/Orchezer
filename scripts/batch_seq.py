@@ -35,8 +35,16 @@ def batch_append(events):
 
 
 def snapshot_policy(counter, every=SNAPSHOT_EVERY):
-    step = int(every) if int(every) > 0 else SNAPSHOT_EVERY
-    c = int(counter)
+    try:
+        step = int(every)
+    except (ValueError, TypeError):
+        return False
+    if step <= 0:
+        step = SNAPSHOT_EVERY
+    try:
+        c = int(counter)
+    except (ValueError, TypeError):
+        return False
     return c > 0 and (c % step == 0)
 
 

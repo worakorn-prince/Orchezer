@@ -420,5 +420,50 @@ class TestTelemetryCollect(unittest.TestCase):
         self.assertTrue(vio2)
 
 
+class TestLlmSectionPhaseC(unittest.TestCase):
+    def test_llm_section_verified_with_known_tokens(self):
+        import telemetry_collect
+        rows = [
+            {"task_id": "T1", "calls": 1, "input_tokens": 1200, "output_tokens": 300, "latency_ms": 850.5},
+            {"task_id": "T1", "calls": 1, "input_tokens": 800, "output_tokens": 200, "latency_ms": 700.0},
+            {"task_id": "T2", "calls": 1, "input_tokens": 500, "output_tokens": 100, "latency_ms": 600.0},
+        ]
+        sec = telemetry_collect.llm_section(rows)
+        self.assertEqual(sec["status"], "VERIFIED")
+        self.assertEqual(sec["metrics"]["total_calls"], 3)
+        self.assertEqual(sec["metrics"]["input_tokens"], 2500)
+        self.assertEqual(sec["metrics"]["output_tokens"], 600)
+        self.assertEqual(sec["metrics"]["total_tokens"], 3100)
+        self.assertAlmostEqual(sec["metrics"]["latency"], (850.5 + 700.0 + 600.0) / 3)
+        self.assertEqual(sec["evidence"]["rows"], 3)
+        self.assertLess(sec["evidence"]["unknown_ratio"], 1.0)
+        self.assertTrue(sec["collection_method"])
+
+    def test_llm_section_current_four_null_unknown(self):
+        import telemetry_collect
+        path = os.path.abspath(
+            os.path.join(HERE, "..", ".agent", "manager", "llm-telemetry.jsonl"))
+        rows, _ = telemetry_collect.load_rows(path)
+        sec = telemetry_collect.llm_section(rows)
+        self.assertEqual(sec["status"], "UNKNOWN")
+        self.assertEqual(sec["evidence"], {"rows": 4, "unknown_ratio": 1.0})
+        self.assertTrue(sec["reason"])
+        self.assertTrue(sec["collection_method"])
+        self.assertTrue(all(v is None for v in sec["metrics"].values()))
+
+    def test_llm_section_below_min_unknown(self):
+        import telemetry_collect
+        rows = [
+            {"task_id": "T1", "calls": 1, "input_tokens": 100, "output_tokens": 50, "latency_ms": 100.0},
+            {"task_id": "T2", "calls": 1, "input_tokens": 200, "output_tokens": 60, "latency_ms": 200.0},
+        ]
+        sec = telemetry_collect.llm_section(rows)
+        self.assertEqual(sec["status"], "UNKNOWN")
+        self.assertEqual(sec["evidence"]["rows"], 2)
+        self.assertTrue(sec["reason"])
+        self.assertTrue(sec["collection_method"])
+        self.assertTrue(all(v is None for v in sec["metrics"].values()))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -113,6 +113,58 @@ def summarize(rows):
     }
 
 
+def llm_section(rows, min_rows=3):
+    s = summarize(rows)
+    n = len(rows)
+    ratio = s.get("unknown_ratio", 0.0)
+    method = (
+        "aggregated from .agent/manager/llm-telemetry.jsonl "
+        "via scripts/telemetry_collect.py (load_rows+summarize); "
+        "deterministic stdlib-only; rerunnable: "
+        "python scripts/telemetry_collect.py "
+        ".agent/manager/llm-telemetry.jsonl"
+    )
+    if n >= min_rows and ratio < 1.0:
+        total = s["known_input_tokens"] + s["known_output_tokens"]
+        lat = s.get("latency_known_ms", [])
+        avg_lat = (sum(lat) / len(lat)) if lat else None
+        return {
+            "status": "VERIFIED",
+            "collection_method": method,
+            "evidence": {"rows": n, "unknown_ratio": ratio},
+            "metrics": {
+                "total_calls": s["total_calls"],
+                "input_tokens": s["known_input_tokens"],
+                "output_tokens": s["known_output_tokens"],
+                "total_tokens": total,
+                "latency": avg_lat,
+            },
+        }
+    if n < min_rows:
+        reason = (
+            "insufficient rows (%d < %d); need >=3 tasks "
+            "per design phase A" % (n, min_rows)
+        )
+    else:
+        reason = (
+            "no known tokens/latency in rows "
+            "(unknown_ratio=1.0); no live values to verify"
+        )
+    return {
+        "status": "UNKNOWN",
+        "reason": reason,
+        "collection_method": method,
+        "evidence": {"rows": n, "unknown_ratio": ratio},
+        "metrics": {
+            "total_calls": None,
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": None,
+            "latency": None,
+        },
+    }
+
+
 if __name__ == "__main__":
     import sys
     target = sys.argv[1] if len(sys.argv) > 1 else ""

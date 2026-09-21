@@ -1,20 +1,20 @@
 {
-  "generated_at": "2026-09-21T16:40:56.931278+00:00",
-  "commit": "ea749dc",
+  "generated_at": "2026-09-21T17:12:40.613016+00:00",
+  "commit": "7ecd9bb",
   "execution": {
-    "suite_seconds": 14.77,
-    "passed": 155,
+    "suite_seconds": 15.167,
+    "passed": 158,
     "failed": 0,
     "success_rate": 1.0,
-    "bench_max_ms": 21.086,
-    "bench_median_ms": 2.738,
+    "bench_max_ms": 18.669,
+    "bench_median_ms": 3.038,
     "bench_rows": [
       {
         "tasks": 100,
         "workers": 1,
-        "validate_ms": 0.31,
-        "waves_ms": 0.512,
-        "assign_ms": 0.379,
+        "validate_ms": 0.289,
+        "waves_ms": 0.527,
+        "assign_ms": 0.37,
         "waves": 5,
         "batches": 100,
         "conflicts": 0
@@ -22,9 +22,9 @@
       {
         "tasks": 100,
         "workers": 3,
-        "validate_ms": 0.182,
-        "waves_ms": 0.366,
-        "assign_ms": 0.904,
+        "validate_ms": 0.29,
+        "waves_ms": 0.444,
+        "assign_ms": 1.102,
         "waves": 5,
         "batches": 35,
         "conflicts": 0
@@ -32,9 +32,9 @@
       {
         "tasks": 100,
         "workers": 5,
-        "validate_ms": 0.176,
-        "waves_ms": 0.287,
-        "assign_ms": 1.344,
+        "validate_ms": 0.219,
+        "waves_ms": 0.33,
+        "assign_ms": 1.853,
         "waves": 5,
         "batches": 20,
         "conflicts": 0
@@ -42,9 +42,9 @@
       {
         "tasks": 300,
         "workers": 1,
-        "validate_ms": 0.558,
-        "waves_ms": 0.911,
-        "assign_ms": 1.481,
+        "validate_ms": 0.565,
+        "waves_ms": 0.962,
+        "assign_ms": 1.374,
         "waves": 5,
         "batches": 300,
         "conflicts": 0
@@ -52,9 +52,9 @@
       {
         "tasks": 300,
         "workers": 3,
-        "validate_ms": 0.557,
-        "waves_ms": 0.922,
-        "assign_ms": 2.738,
+        "validate_ms": 0.7,
+        "waves_ms": 1.233,
+        "assign_ms": 3.038,
         "waves": 5,
         "batches": 100,
         "conflicts": 0
@@ -62,9 +62,9 @@
       {
         "tasks": 300,
         "workers": 5,
-        "validate_ms": 0.561,
-        "waves_ms": 0.9,
-        "assign_ms": 4.277,
+        "validate_ms": 0.597,
+        "waves_ms": 0.908,
+        "assign_ms": 4.601,
         "waves": 5,
         "batches": 60,
         "conflicts": 0
@@ -72,9 +72,9 @@
       {
         "tasks": 1000,
         "workers": 1,
-        "validate_ms": 1.595,
-        "waves_ms": 2.856,
-        "assign_ms": 12.799,
+        "validate_ms": 1.838,
+        "waves_ms": 3.122,
+        "assign_ms": 12.636,
         "waves": 5,
         "batches": 1000,
         "conflicts": 0
@@ -82,9 +82,9 @@
       {
         "tasks": 1000,
         "workers": 3,
-        "validate_ms": 1.89,
-        "waves_ms": 5.564,
-        "assign_ms": 12.531,
+        "validate_ms": 1.866,
+        "waves_ms": 2.659,
+        "assign_ms": 10.844,
         "waves": 5,
         "batches": 335,
         "conflicts": 0
@@ -92,27 +92,31 @@
       {
         "tasks": 1000,
         "workers": 5,
-        "validate_ms": 3.628,
-        "waves_ms": 4.613,
-        "assign_ms": 21.086,
+        "validate_ms": 2.384,
+        "waves_ms": 3.966,
+        "assign_ms": 18.669,
         "waves": 5,
         "batches": 200,
         "conflicts": 0
       }
     ],
-    "queue_terminal": 94,
+    "queue_terminal": 98,
     "queue_counts": {
-      "completed": 93,
+      "completed": 97,
       "cancelled": 1,
-      "total": 96
+      "total": 99
     },
     "suite_returncode": 0,
     "scale_returncode": 0
   },
   "llm": {
     "status": "UNKNOWN",
-    "reason": "no live LLM telemetry in repo",
-    "collection_method": "reviewed repo for live LLM call/token/latency telemetry (total calls, input/output tokens, latency); no live source found so no values recorded; marked UNKNOWN per New-Architecture-v1 section 4 and left for the investigate step",
+    "reason": "no known tokens/latency in rows (unknown_ratio=1.0); no live values to verify",
+    "collection_method": "aggregated from .agent/manager/llm-telemetry.jsonl via scripts/telemetry_collect.py (load_rows+summarize); deterministic stdlib-only; rerunnable: python scripts/telemetry_collect.py .agent/manager/llm-telemetry.jsonl",
+    "evidence": {
+      "rows": 4,
+      "unknown_ratio": 1.0
+    },
     "metrics": {
       "total_calls": null,
       "input_tokens": null,

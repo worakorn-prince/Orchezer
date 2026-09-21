@@ -33,6 +33,22 @@ SCALE_SCRIPT = ".agent/manager/tasks/CU-09B/bench_scale.py"
 
 QUEUE_FILE = pathlib.Path(".agent") / "manager" / "queue.json"
 
+LLM_TELEMETRY_FILE = pathlib.Path(".agent") / "manager" / "llm-telemetry.jsonl"
+
+_HERE = pathlib.Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+import telemetry_collect
+
+
+def build_llm(root):
+    try:
+        rows, _ = telemetry_collect.load_rows(str(root / LLM_TELEMETRY_FILE))
+    except Exception:
+        rows = []
+    return telemetry_collect.llm_section(rows)
+
 ROW_RE = re.compile(
     r"^(\d+),(\d+),([\d.]+),([\d.]+),([\d.]+),(\d+),(\d+),(\d+)\s*$"
 )
@@ -139,6 +155,7 @@ def main():
     suite = run_suite(root)
     scale = run_scale(root)
     queue = read_queue(root)
+    llm = build_llm(root)
     generated_at = (
         datetime.datetime.now(datetime.timezone.utc).isoformat()
     )
@@ -162,28 +179,10 @@ def main():
             "suite_returncode": suite["returncode"],
             "scale_returncode": scale["returncode"],
         },
-        "llm": {
-            "status": "UNKNOWN",
-            "reason": "no live LLM telemetry in repo",
-            "collection_method": (
-                "reviewed repo for live LLM call/token/latency "
-                "telemetry (total calls, input/output tokens, "
-                "latency); no live source found so no values "
-                "recorded; marked UNKNOWN per "
-                "New-Architecture-v1 section 4 and left for the "
-                "investigate step"
-            ),
-            "metrics": {
-                "total_calls": None,
-                "input_tokens": None,
-                "output_tokens": None,
-                "total_tokens": None,
-                "latency": None,
-            },
-        },
+        "llm": llm,
         "confidence": {
             "execution": "VERIFIED",
-            "llm": "UNKNOWN",
+            "llm": llm["status"],
             "note": (
                 "execution numbers measured live in this run; "
                 "llm values absent (UNKNOWN must be investigated; "

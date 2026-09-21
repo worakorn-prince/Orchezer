@@ -124,6 +124,12 @@ class TestLeanMerge(unittest.TestCase):
         self.assertEqual(len(plan["batches"]), 4)
         self.assertGreater(plan["capacity_skips"], 0)
 
+    def test_validate_empty_pkg_missing_complete(self):
+        ok, missing = ctx_compiler.validate_completeness({})
+        self.assertFalse(ok)
+        for key in ("Task", "Task.id", "Task.acceptance"):
+            self.assertIn(key, missing)
+
 
 if __name__ == "__main__":
     unittest.main()

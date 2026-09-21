@@ -18,6 +18,7 @@ import ctx_cache
 import dag_waves
 import lean_flow
 import batch_seq
+import confidence_tags
 
 
 def _demo_tasks():
@@ -129,6 +130,57 @@ class TestLeanMerge(unittest.TestCase):
         self.assertFalse(ok)
         for key in ("Task", "Task.id", "Task.acceptance"):
             self.assertIn(key, missing)
+
+    def test_tag_empty_defaults_assumed(self):
+        self.assertEqual(confidence_tags.tag({}), "ASSUMED")
+
+    def test_tag_verified_without_verifier_falls_back(self):
+        self.assertEqual(confidence_tags.tag({"confidence": "VERIFIED"}), "ASSUMED")
+
+    def test_verify_package_unknown_flagged(self):
+        self.assertEqual(
+            confidence_tags.verify_package({"Requirements": [{"confidence": "UNKNOWN"}]}),
+            (False, [0]),
+        )
+
+    def test_levels_typo_single_file_low(self):
+        import task_levels
+        level, reasons = task_levels.classify(
+            {"id": "TYPO", "title": "fix typo", "files": ["docs/guide.md"], "dependencies": []}
+        )
+        self.assertEqual(level, "LOW")
+        self.assertTrue(reasons)
+
+    def test_levels_db_touch_high(self):
+        import task_levels
+        level, reasons = task_levels.classify(
+            {"id": "DB1", "title": "add column", "files": ["db/migrate/001_add_col.sql"], "dependencies": []}
+        )
+        self.assertEqual(level, "HIGH")
+        self.assertTrue(reasons)
+
+    def test_levels_five_files_medium(self):
+        import task_levels
+        level, reasons = task_levels.classify(
+            {"id": "M5", "title": "general update",
+             "files": ["src/m%d.py" % i for i in range(5)], "dependencies": []}
+        )
+        self.assertEqual(level, "MEDIUM")
+        self.assertTrue(reasons)
+
+    def test_levels_empty_task_medium_no_files(self):
+        import task_levels
+        level, reasons = task_levels.classify({})
+        self.assertEqual(level, "MEDIUM")
+        self.assertTrue(any("no files" in str(r).lower() for r in reasons))
+
+    def test_levels_dependencies_list_not_high(self):
+        import task_levels
+        level, reasons = task_levels.classify(
+            {"id": "DEP1", "title": "dag only", "files": ["src/a.py"], "dependencies": ["A"]}
+        )
+        self.assertEqual(level, "LOW")
+        self.assertTrue(reasons)
 
 
 if __name__ == "__main__":

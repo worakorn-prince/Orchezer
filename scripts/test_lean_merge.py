@@ -246,9 +246,9 @@ class TestFeedbackLoop(unittest.TestCase):
     def test_feedback_record_three_summarize_counts(self):
         import feedback_loop
         store = []
-        feedback_loop.record_event(store, {"task": "T1", "result": "PASS", "failure": "", "owns": ["a/x.py"]})
-        feedback_loop.record_event(store, {"task": "T2", "result": "FAIL", "failure": "TEST_FAIL", "owns": ["a/y.py"]})
-        feedback_loop.record_event(store, {"task": "T3", "result": "FAIL", "failure": "TEST_FAIL", "owns": ["b/z.py"]})
+        store = feedback_loop.record_event(store, {"task": "T1", "result": "PASS", "failure": "", "owns": ["a/x.py"]})
+        store = feedback_loop.record_event(store, {"task": "T2", "result": "FAIL", "failure": "TEST_FAIL", "owns": ["a/y.py"]})
+        store = feedback_loop.record_event(store, {"task": "T3", "result": "FAIL", "failure": "TEST_FAIL", "owns": ["b/z.py"]})
         summary = feedback_loop.summarize(store)
         self.assertEqual(summary["total"], 3)
         self.assertEqual(summary["by_result"], {"PASS": 1, "FAIL": 2})
@@ -258,8 +258,8 @@ class TestFeedbackLoop(unittest.TestCase):
     def test_feedback_repeat_fail_suggests(self):
         import feedback_loop
         store = []
-        feedback_loop.record_event(store, {"task": "T1", "result": "FAIL", "failure": "TEST_FAIL", "owns": ["a/x.py"]})
-        feedback_loop.record_event(store, {"task": "T2", "result": "FAIL", "failure": "TEST_FAIL", "owns": ["a/y.py"]})
+        store = feedback_loop.record_event(store, {"task": "T1", "result": "FAIL", "failure": "TEST_FAIL", "owns": ["a/x.py"]})
+        store = feedback_loop.record_event(store, {"task": "T2", "result": "FAIL", "failure": "TEST_FAIL", "owns": ["a/y.py"]})
         summary = feedback_loop.summarize(store)
         tips = feedback_loop.suggest(summary)
         self.assertTrue(tips)
@@ -318,10 +318,6 @@ class TestRequireVerification(unittest.TestCase):
         self.assertEqual(missing, [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestTaskContract(unittest.TestCase):
     def test_contract_full_with_verification_ok(self):
         import task_contract
@@ -362,3 +358,30 @@ class TestTaskContract(unittest.TestCase):
         self.assertEqual(level, "LOW")
         self.assertTrue(ok, missing)
         self.assertEqual(missing, [])
+
+    def test_build_report_single_string_file(self):
+        import verify_report
+        rep = verify_report.build_report(
+            {"passed": 10, "failed": 0},
+            True,
+            "scripts/verify_report.py",
+            {"all_met": True},
+            {"status": "PASS"},
+        )
+        self.assertEqual(rep["files"], ["scripts/verify_report.py"])
+        self.assertEqual(rep["verdict"], "PASS")
+
+
+class TestFeedbackRecordImmutability(unittest.TestCase):
+    def test_record_returns_new_store(self):
+        import feedback_loop
+        store = []
+        result = feedback_loop.record_event(
+            store, {"task": "T1", "result": "PASS", "failure": "", "owns": ["a/x.py"]})
+        self.assertIsNot(result, store)
+        self.assertEqual(len(store), 0)
+        self.assertEqual(len(result), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

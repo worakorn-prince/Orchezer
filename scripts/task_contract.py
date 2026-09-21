@@ -3,18 +3,9 @@
 import task_levels
 import verify_report
 import confidence_tags
+from verify_report import _nonempty_value as _present
 
 CONTRACT_FIELDS = ("id", "objective", "inputs", "outputs", "dependencies", "owns", "constraints", "acceptance", "verification", "risk")
-
-
-def _present(value):
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, (list, dict, set, tuple)):
-        return len(value) > 0
-    return bool(value)
 
 
 def validate_contract(contract):

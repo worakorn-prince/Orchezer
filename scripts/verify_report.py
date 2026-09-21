@@ -16,7 +16,10 @@ def build_report(tests: dict, build_ok: bool, files_changed: list, acceptance: d
     tests = dict(tests or {})
     acceptance = dict(acceptance or {})
     review = dict(review or {})
-    files = list(files_changed or [])
+    if isinstance(files_changed, str):
+        files = [files_changed]
+    else:
+        files = list(files_changed or [])
     failed = tests.get("failed", 1)
     try:
         failed = int(failed)
@@ -35,11 +38,11 @@ def build_report(tests: dict, build_ok: bool, files_changed: list, acceptance: d
         reasons.append("review not PASS (%r)" % (status,))
     verdict = "PASS" if not reasons else "FAIL"
     return {
-        "tests": tests,
-        "build": {"ok": bool(build_ok)},
-        "files": files,
-        "acceptance": acceptance,
-        "review": review,
+        FIELDS[0]: tests,
+        FIELDS[1]: {"ok": bool(build_ok)},
+        FIELDS[2]: files,
+        FIELDS[3]: acceptance,
+        FIELDS[4]: review,
         "verdict": verdict,
         "reasons": reasons,
         "generated_at": _utcnow(),
@@ -49,7 +52,7 @@ def build_report(tests: dict, build_ok: bool, files_changed: list, acceptance: d
 def valid_report(rep) -> bool:
     if not isinstance(rep, dict):
         return False
-    for key in ("tests", "build", "files", "acceptance", "review", "verdict", "generated_at"):
+    for key in (*FIELDS, "verdict", "generated_at"):
         if key not in rep:
             return False
     if rep.get("verdict") not in ("PASS", "FAIL"):

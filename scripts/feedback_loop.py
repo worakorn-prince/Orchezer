@@ -1,3 +1,9 @@
+"""feedback_loop.py -- event store helpers.
+
+Event schema: required keys task/result/failure (default "" when missing);
+optional keys plan/execution/owns when available.
+"""
+
 def record_event(store, event):
     item = dict(event)
     if "task" not in item:
@@ -6,8 +12,7 @@ def record_event(store, event):
         item["result"] = ""
     if "failure" not in item:
         item["failure"] = ""
-    store.append(item)
-    return store
+    return [*store, item]
 
 
 def _zone_of(entry):
@@ -66,19 +71,20 @@ def summarize(store):
 def suggest(summary):
     out = []
     by_failure = summary.get("by_failure", {})
+    if not isinstance(by_failure, dict):
+        by_failure = {}
     for kind in sorted(by_failure.keys()):
-        try:
-            count = by_failure[kind]
-        except Exception:
+        count = by_failure[kind]
+        if not isinstance(count, (int, float)):
             continue
         if count >= 2:
             out.append(
                 "adjust contract/validator at point of %s (seen %d times)" % (kind, count)
             )
     rate = summary.get("success_rate", 1.0)
-    try:
+    if isinstance(rate, (int, float)):
         low = float(rate) < 1.0
-    except Exception:
+    else:
         low = False
     if low:
         out.append("add acceptance examples to cover failing cases")

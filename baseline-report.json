@@ -1,20 +1,20 @@
 {
-  "generated_at": "2026-09-21T14:17:57.873184+00:00",
-  "commit": "185d719",
+  "generated_at": "2026-09-21T16:40:56.931278+00:00",
+  "commit": "ea749dc",
   "execution": {
-    "suite_seconds": 13.626,
-    "passed": 127,
+    "suite_seconds": 14.77,
+    "passed": 155,
     "failed": 0,
     "success_rate": 1.0,
-    "bench_max_ms": 26.207,
-    "bench_median_ms": 4.161,
+    "bench_max_ms": 21.086,
+    "bench_median_ms": 2.738,
     "bench_rows": [
       {
         "tasks": 100,
         "workers": 1,
-        "validate_ms": 0.27,
-        "waves_ms": 0.527,
-        "assign_ms": 0.381,
+        "validate_ms": 0.31,
+        "waves_ms": 0.512,
+        "assign_ms": 0.379,
         "waves": 5,
         "batches": 100,
         "conflicts": 0
@@ -22,9 +22,9 @@
       {
         "tasks": 100,
         "workers": 3,
-        "validate_ms": 0.268,
-        "waves_ms": 0.439,
-        "assign_ms": 1.107,
+        "validate_ms": 0.182,
+        "waves_ms": 0.366,
+        "assign_ms": 0.904,
         "waves": 5,
         "batches": 35,
         "conflicts": 0
@@ -32,9 +32,9 @@
       {
         "tasks": 100,
         "workers": 5,
-        "validate_ms": 0.285,
-        "waves_ms": 0.54,
-        "assign_ms": 2.45,
+        "validate_ms": 0.176,
+        "waves_ms": 0.287,
+        "assign_ms": 1.344,
         "waves": 5,
         "batches": 20,
         "conflicts": 0
@@ -42,9 +42,9 @@
       {
         "tasks": 300,
         "workers": 1,
-        "validate_ms": 0.841,
-        "waves_ms": 1.263,
-        "assign_ms": 1.987,
+        "validate_ms": 0.558,
+        "waves_ms": 0.911,
+        "assign_ms": 1.481,
         "waves": 5,
         "batches": 300,
         "conflicts": 0
@@ -52,9 +52,9 @@
       {
         "tasks": 300,
         "workers": 3,
-        "validate_ms": 0.852,
-        "waves_ms": 1.614,
-        "assign_ms": 4.161,
+        "validate_ms": 0.557,
+        "waves_ms": 0.922,
+        "assign_ms": 2.738,
         "waves": 5,
         "batches": 100,
         "conflicts": 0
@@ -62,9 +62,9 @@
       {
         "tasks": 300,
         "workers": 5,
-        "validate_ms": 0.752,
-        "waves_ms": 1.285,
-        "assign_ms": 4.847,
+        "validate_ms": 0.561,
+        "waves_ms": 0.9,
+        "assign_ms": 4.277,
         "waves": 5,
         "batches": 60,
         "conflicts": 0
@@ -72,9 +72,9 @@
       {
         "tasks": 1000,
         "workers": 1,
-        "validate_ms": 3.299,
-        "waves_ms": 5.231,
-        "assign_ms": 15.719,
+        "validate_ms": 1.595,
+        "waves_ms": 2.856,
+        "assign_ms": 12.799,
         "waves": 5,
         "batches": 1000,
         "conflicts": 0
@@ -82,9 +82,9 @@
       {
         "tasks": 1000,
         "workers": 3,
-        "validate_ms": 2.25,
-        "waves_ms": 3.155,
-        "assign_ms": 12.976,
+        "validate_ms": 1.89,
+        "waves_ms": 5.564,
+        "assign_ms": 12.531,
         "waves": 5,
         "batches": 335,
         "conflicts": 0
@@ -92,19 +92,19 @@
       {
         "tasks": 1000,
         "workers": 5,
-        "validate_ms": 2.314,
-        "waves_ms": 3.284,
-        "assign_ms": 26.207,
+        "validate_ms": 3.628,
+        "waves_ms": 4.613,
+        "assign_ms": 21.086,
         "waves": 5,
         "batches": 200,
         "conflicts": 0
       }
     ],
-    "queue_terminal": 84,
+    "queue_terminal": 94,
     "queue_counts": {
-      "completed": 83,
+      "completed": 93,
       "cancelled": 1,
-      "total": 85
+      "total": 96
     },
     "suite_returncode": 0,
     "scale_returncode": 0

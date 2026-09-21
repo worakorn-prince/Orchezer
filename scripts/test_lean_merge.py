@@ -383,5 +383,42 @@ class TestFeedbackRecordImmutability(unittest.TestCase):
         self.assertEqual(len(result), 1)
 
 
+class TestTelemetryCollect(unittest.TestCase):
+    def _real_path(self):
+        return os.path.abspath(
+            os.path.join(HERE, "..", ".agent", "manager", "llm-telemetry.jsonl"))
+
+    def test_collect_load_real_four_rows(self):
+        import telemetry_collect
+        rows, skipped = telemetry_collect.load_rows(self._real_path())
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(skipped, 0)
+
+    def test_collect_summarize_unknown_ratio_one(self):
+        import telemetry_collect
+        rows, _ = telemetry_collect.load_rows(self._real_path())
+        s = telemetry_collect.summarize(rows)
+        self.assertEqual(s["total_calls"], 4)
+        self.assertEqual(s["known_input_tokens"], 0)
+        self.assertEqual(s["known_output_tokens"], 0)
+        self.assertEqual(s["unknown_ratio"], 1.0)
+        self.assertEqual(s["per_task"], {"CL-01": 2, "INV-01": 2})
+        self.assertEqual(s["latency_known_ms"], [])
+
+    def test_collect_privacy_real_ok_injected_fail(self):
+        import telemetry_collect
+        rows, _ = telemetry_collect.load_rows(self._real_path())
+        ok, vio = telemetry_collect.check_privacy(rows)
+        self.assertTrue(ok)
+        self.assertEqual(vio, [])
+        bad = [
+            {"task_id": "X", "note": "my secret value"},
+            {"task_id": "Y", "api_key": "123"},
+        ]
+        ok2, vio2 = telemetry_collect.check_privacy(bad)
+        self.assertFalse(ok2)
+        self.assertTrue(vio2)
+
+
 if __name__ == "__main__":
     unittest.main()

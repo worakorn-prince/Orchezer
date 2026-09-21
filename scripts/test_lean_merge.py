@@ -183,5 +183,43 @@ class TestLeanMerge(unittest.TestCase):
         self.assertTrue(reasons)
 
 
+    def test_verify_report_all_green_pass(self):
+        import verify_report
+        rep = verify_report.build_report(
+            {"passed": 10, "failed": 0},
+            True,
+            ["scripts/verify_report.py"],
+            {"all_met": True},
+            {"status": "PASS"},
+        )
+        self.assertEqual(rep["verdict"], "PASS")
+        self.assertTrue(verify_report.valid_report(rep))
+
+    def test_verify_report_failed_tests_fail(self):
+        import verify_report
+        rep = verify_report.build_report(
+            {"passed": 9, "failed": 1},
+            True,
+            ["scripts/verify_report.py"],
+            {"all_met": True},
+            {"status": "PASS"},
+        )
+        self.assertEqual(rep["verdict"], "FAIL")
+        self.assertTrue(rep["reasons"])
+
+    def test_verify_report_broken_invalid(self):
+        import verify_report
+        rep = verify_report.build_report(
+            {"passed": 10, "failed": 0},
+            True,
+            ["scripts/verify_report.py"],
+            {"all_met": True},
+            {"status": "PASS"},
+        )
+        broken = dict(rep)
+        broken.pop("tests")
+        self.assertFalse(verify_report.valid_report(broken))
+
+
 if __name__ == "__main__":
     unittest.main()

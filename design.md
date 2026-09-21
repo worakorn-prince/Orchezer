@@ -2074,3 +2074,56 @@ Out of MVP core (see FIX-V2-28 boundary).
 - [x] P0-P2 / P0/P1/P2 DONE → P0 in Phase 1, P1 in Phase 2-3, P2 in Phase 5.
 - [x] FIX-1–FIX-5 / FIX-1-5 DONE → implementation checklists under Phase 1-3.
 - [x] FIX-V2-01–29 / FIX-V2-01-29 DONE → Phase 0 (FIX-V2-20), Phase 1 (FIX-V2-12/13/14/18/19), Phase 2 (FIX-V2-28), Phase 3 (FIX-V2-11/17/21/27), Phase 4 (FIX-V2-22/23/24/25).
+
+---
+
+# ภาคผนวก DOC-02 — รวมเอกสาร New-Architecture + Roadmap + สถานะบิลด์ (คีย์ DOC-02:PLAN:001)
+
+> วิธีรวม: integrate+dedupe — คงโครง §1–§26 เดิมทุกประการ ส่วนใดมีใน design.md แล้วให้อ้างเลข § เดิม ไม่เขียนซ้ำ
+> ต้นฉบับ (อ่านอย่างเดียว ห้ามแตะ): `New-Architecture-v1.md` (719 บรรทัด 17 ส่วน) + `Implementation-Roadmap-v1.md` (612 บรรทัด Phase 0–9+MVP) + `implementation-plan.md` (84 บรรทัด รีเฟรชแล้ว)
+> หลัก: ไม่ผูกโมเดลเฉพาะรุ่น (model-agnostic) — เครื่องมือมากับฮาร์เนส ไม่ใช่โมเดล
+
+## ผนวก ก. New Architecture v1 — สรุปย่อ (อ้างเลขส่วนต้นฉบับ)
+
+วิชัน (Vision): ใช้ LLM reasoning เฉพาะจุดจำเป็น ย้ายงานดีเทอร์มินิสติกให้ระบบทำแทน — ลดโทเค็น/calls เพิ่ม correctness/reliability รองรับ parallel อย่างปลอดภัย วัดผลจากข้อมูลจริง
+แบ่งอำนาจ (§2): `Manager = Decision Authority` (เข้าใจ intent วิเคราะห์ วางแผน สร้าง Task Contract เลือกความซับซ้อน ประสาน execution รับมือ failure) / `System = Rule Authority` (ตรวจ dependency/conflict/completeness/safety จัด DAG/wave/lock เกต verification/recovery — Manager บายพาสไม่ได้)
+Confidence 4 สถานะ (§4): KNOWN (รู้จาก context) / ASSUMED (คาดเดา ใช้เป็น fact ไม่ได้) / UNKNOWN (ต้อง investigate) / VERIFIED (ตรวจแล้ว) — กฎเหล็ก `ASSUMED != VERIFIED` กัน hallucination
+Task Contract (§5): ทุกงาน non-LOW ต้องมี Task ID/Objective/Inputs/Outputs/Dependencies/Files To Read-Modifying/Constraints/Acceptance/Verification/Risk — worker รันจาก contract ไม่ใช่คำสั่ง vague
+รูเตอร์ 3 ระดับ (§6): LOW (typo/config/ฟังก์ชันเล็ก → Context→Manager→Building→Test ข้าม validator) / MEDIUM (ฟีเจอร์ → Contract→Validator→Scheduler→Building→Review→Verification) / HIGH (เปลี่ยนสถาปัตยกรรม → เพิ่ม Risk Check + Additional Review + Parallel)
+Validator (§7, deterministic ไม่ใช้ LLM): ตรวจ Dependency (missing/circular/wrong-order) + Scope (ownership-conflict/duplicate/unclear) + Completeness (reject งานไม่มี verification) + Safety (protected-file/risky/migration)
+Scheduler + Ownership + Parallelism (§8–§10): สร้าง DAG แบ่ง wave assign worker; ทุกทาสก์ประกาศ owns เมื่อชนทางเลือก serialize/split/exclusive-lock; parallel แบบ adaptive (task count + independence + context cost + conflict risk — more agents != always faster)
+Verification/Recovery (§11–§12 — มีแล้วใน design.md ไม่เขียนซ้ำ): ดู §19 + §26.3 (Evidence gate) + §26.10 (VERIFYING บังคับ) + §11 + §18 + §26.4/§26.11/§26.16/§26.23–§26.24 (recovery hierarchy + idempotent + re-entrant)
+Metrics/Feedback (§13–§15 — มีแล้ว ไม่เขียนซ้ำ): ดู §26.5 (events) + §26.28 (tool-calls/metrics/dashboard) + §26.33 (reliability) — วัด LLM Tokens-Calls/Time ต่อ successful task + success/recovery rate; ผลลัพธ์วนปรับ context (project-specific intelligence ไม่ใช่เทรนโมเดล)
+หลัก §17 (6 ข้อ): 1) อย่าเพิ่มเอเจนต์ถ้าไม่มี measurable benefit 2) อย่าใช้ LLM แก้ปัญหาที่โค้ดแก้ได้ 3) อย่าบังคับทุกทาสก์ผ่าน workflow ใหญ่ 4) progressive planning 5) วัดก่อนเพิ่มฟีเจอร์ 6) reliability > autonomy — อนึ่ง §16 ถอด OpenVisio ออกจาก core แล้ว (ใช้ event/state ต่อภาพภายหลังได้)
+
+## ผนวก ข. Roadmap Phase 0–9 + MVP (อ้าง implementation-plan.md §3–§4)
+
+| เฟส Roadmap | ประเด็น | สถานะบิลด์ (อ้าง implementation-plan.md) |
+|---|---|---|
+| Phase 0 Baseline | `baseline-report.json` (LLM calls/tokens/latency + time/success/retry/failure-type) ทำก่อนทุกเฟส | สร้างเสร็จ (`collect_baseline` DONE) |
+| Phase 1 Context | compiler/cache เดิม (ลดโทเค็น 59.1%) | ข้าม — มีแล้ว คงเดิม |
+| Phase 2 Contract | เติม confidence-state + บังคับ verification (non-LOW) | สร้างเสร็จ (`confidence_tags` P2-01 + `task_contract` P2-02) |
+| Phase 3 Router | rule-based classifier LOW/MEDIUM/HIGH + เหตุผลทุกครั้ง | สร้างเสร็จ (`task_levels` P3-01) |
+| Phase 4 Validator | completeness gate ปฏิเสธงานไม่มี verification | สร้างเสร็จ (`require_verification` P4-01) |
+| Phase 5 Scheduler | เอกสาร serialize/split/exclusive-lock (`docs/ownership-policy.md`) | สร้างเสร็จ เวฟ `[A,B,D]→[C]→[E]` คงเดิม |
+| Phase 6 Verification | `verification-report.json` (tests/build/files/acceptance/review) | สร้างเสร็จ (`verify_report` P6-01) |
+| Phase 7 Recovery | failure classification 6 แบบ + retry budget (ใช้ checkpoint/lease/events เดิม — มีแล้วดู §26.4/§26.11 ไม่เขียนซ้ำ) | สร้างเสร็จ (`failure_kinds` P7-01) |
+| Phase 8 Parallelism | ตัวเลือก worker 1/3/5 บน `capacity_hint` เดิม | สร้างเสร็จ (`worker_choice` P8-01) |
+| Phase 9 Feedback | feedback เต็มรูป Task/Plan/Execution/Result/Failure → context improvement (ไม่เทรนโมเดล) | สร้างเสร็จ (`feedback_loop` P9-01) |
+MVP YES (v1.0 ต้องมี — มีแล้วครบ): Context Cache / Task Contract / Validator / Scheduler / Verification / Metrics (+baseline ใหม่)
+MVP NO (ไม่ทำใน v1.0): Multi Manager / Swarm Intelligence / Auto Learning / Complex AI Critic / Visualization dependency (รวม OpenVisio ที่ถอดตาม §16)
+
+## ผนวก ค. Build-status appendix — ตารางเฟสที่สร้างเสร็จพร้อมหลักฐาน
+
+| เฟส | สิ่งที่ส่งมอบ | หลักฐาน (อ้าง implementation-plan.md §2 + ผลรันจริง) |
+|---|---|---|
+| Phase 0 | `baseline-report.json` + `collect_baseline` | ไฟล์ baseline 1 ชุด รันซ้ำดีเทอร์มินิสติก + batch_seq 3 เวลา (queue/compile/persist) |
+| Phase 2 | `confidence_tags` (P2-01) + `task_contract` (P2-02) | `validate_completeness` ตรวจฟิลด์ confidence + verification ผ่าน |
+| Phase 3 | `task_levels` (P3-01) classifier rule-based | ผ่านเคส LOW/MEDIUM/HIGH + คืนเหตุผลทุกครั้ง |
+| Phase 4 | `require_verification` (P4-01) | reject งานไม่มี verification อัตโนมัติ |
+| Phase 5 | `docs/ownership-policy.md` | เวฟ `[A,B,D]→[C]→[E]` ชน 0 คู่ `capacity_hint=5` + `capacity_skips` นับถูก |
+| Phase 6 | `verify_report` (P6-01) | ทุก DONE อ้าง `verification-report.json` 5 ช่อง |
+| Phase 7 | `failure_kinds` (P7-01) | จำแนก 6 แบบ TOKEN_LIMIT/MODEL_ERROR/CODE_ERROR/TEST_FAIL/CONFLICT + retry budget ลงไฟล์ |
+| Phase 8 | `worker_choice` (P8-01) | เลือก 1/3/5 จาก task count + conflict risk + token budget; เบนช์ CU-09B เคสหนักสุดรวม ~16ms |
+| Phase 9 | `feedback_loop` (P9-01) | pattern report จากรันจริง → ปรับ context (ไม่เทรนโมเดล) |
+ภาพรวม: คิวจบหมด สวีตเทส **127 → 161 เทสเขียวทั้งหมด** (ชุด `test_lean_merge.py` ตรวจ 7 ฟิลด์ + topology + capacity-bound ผ่าน) เหลือข้อมูลโทเค็นจริงสถานะ UNKNOWN อย่างซื่อสัตย์รอวัดจากรันจริง — จุด dedupe ที่ทำ: recovery/locks/events/review/verification ทั้งหมดอ้าง §19/§26 เดิม ไม่เขียนตรรกะซ้ำในภาคผนวกนี้

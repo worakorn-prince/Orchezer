@@ -19,17 +19,17 @@
 
 | # | ส่วน New-Arch | ของที่มีจริง + หลักฐาน | สถานะ | แกปที่เหลือ |
 |---|---|---|---|---|
-| 1 | Context (§3: compiler/cache/state) | `scripts/ctx_compiler.py` (`compile_task` แพ็กเกจลีน 7 ฟิลด์) + `scripts/ctx_cache.py` (lazy refresh, `stale` flag) — หลักฐาน `core-upgrade.md:1044–1061`: ลดโทเค็น **59.1% (587→240)**, ฮิตเรต **0.8 (`hits=8 misses=2`)**, อินวาลิเดต 3 สาย โกลบอลรอด; `test_lean_merge.py:38–69` ตรวจ 7 ฟิลด์ + `manager_validate` ผ่าน | มีแล้วส่วนใหญ่ | ขาด confidence tagging บน context (ยังไม่แปะ KNOWN/ASSUMED/UNKNOWN/VERIFIED) |
-| 2 | Task Contract (§5) | `schema-task` + `manifest` (โครง Task ID/Objective/Inputs/Outputs/Dependencies/Files/Constraints/Acceptance/Verification/Risk ครบตามสเปก CU-01) — อ้าง `test_lean_merge.py:62,127–131` (`validate_completeness` ตรวจ `Task/Task.id/Task.acceptance`) | มีแล้วพื้นฐาน | ขาดฟิลด์ confidence-state ใน contract + การบังคับ `verification method` ทุกทาสก์ที่ไม่ใช่ LOW |
-| 3 | Complexity Router (§6 + รูตติ้ง §15) | มีสเปกรูตติ้ง LOW/MEDIUM/HIGH ตาม §15 ของ Roadmap (เกณฑ์ `<3 files` = LOW; database/core/dependency = HIGH) แต่**ยังไม่มี classifier โค้ด** | ยังไม่มีโค้ด | **สร้างใหม่: rule-based complexity classifier** (stdlib-only, รับ Task+Context+Changed Files → LOW/MEDIUM/HIGH) |
-| 4 | Plan Validator (§7) | `validate_completeness` (ctx_compiler) + `validate_dag` (dag_waves: missing/circular/wrong-order) + review gate (CRITICAL/HIGH outstanding → NOT DONE ห้ามบายพาส — `core-upgrade.md:1084`) | มีแล้วพื้นฐาน | ขาด completeness gate แบบไฟล์ (reject ไม่มี verification) + รายงานผลรวมศูนย์ |
-| 5 | Scheduler + DAG (§8–§9) | `scripts/dag_waves.py` (`build_waves` + `assign` + `check_conflict` สองทิศ + `capacity_skips`) — หลักฐาน `core-upgrade.md:1065–1069` (เวฟ `[A,B,D]→[C]→[E]`, ชน 0 คู่, `capacity_hint=5`) และ `test_lean_merge.py:85–126` (topology + same-zone แยก 3 แบทช์ + capacity-bound นับ skips) | มีแล้ว | ขาด serialize/split-task policy เป็นลายลักษณ์อักษรเมื่อชน owns เดียวกัน (ตอนนี้แยกแบทช์เงียบ) |
-| 6 | Verification (§11) | ชุดเทส **127 เทส** + เกต `VERIFYING` (ตรวจ tests/build/changed-files/acceptance/review ก่อน DONE) | มีแล้วพื้นฐาน | **สร้างใหม่: `verification-report.json`** ต่อรัน (ยังไม่มีไฟล์รวมศูนย์) |
-| 7 | Recovery (§12) | `checkpoint` + `execution state` + `lease` + `events` (idempotent recovery; ตัด optimistic-rollback แล้วเพราะซับซ้อน — `core-upgrade.md:1090–1092`) | มีแล้วพื้นฐาน | ขาด failure classification ครบ 6 แบบ (TOKEN_LIMIT/MODEL_ERROR/CODE_ERROR/TEST_FAIL/CONFLICT + retry budget เป็นไฟล์) |
-| 8 | Adaptive Parallelism (§10) | `capacity_hint` พื้นฐาน (`min(5,len)`, ไม่แตกแบทช์เกินจำเป็น — `core-upgrade.md:1069`) + เบนช์สเกล CU-09B ชี้ว่าคอขวดคือ `assign` (~75% ที่ N=1000) | มีแล้วพื้นฐาน | ขาดตัวเลือกจำนวน worker ตามสถานการณ์ (1/3/5 จาก task count + conflict risk + token budget) |
-| 9 | Metrics/Observability (§13–§14) | `batch_seq` 3 เวลา (`queue_ms ~2.7 / compile_ms ~3.3 / persist_ms ~0.02` — `core-upgrade.md:1060–1081`) + เบนช์ 9 เคส (100/300/1000 × worker 1/3/5 — `CU-09B/results.md:14–24`, เคสหนักสุดรวม ~16ms) + `seq 1-5` + `heartbeat 3/3` + `snapshot N=10` | มีแล้วพื้นฐาน | **สร้างใหม่: `baseline-report.json`** (Phase 0) + ขยายเป็น LLM tokens/calls + success/retry ภายหลัง |
-| 10 | Feedback Loop (§15) | events-driven พื้นฐาน (`batch_append` + snapshot + heartbeat → ปรับ context ภายหลังได้) แต่ยังไม่เต็มรูป | เริ่มต้นเท่านั้น | **สร้างใหม่: feedback loop เต็มรูป** (เก็บ Task/Plan/Execution/Result/Failure → ปรับ context จริง) |
-| 11 | Confidence States (§4) | **ยังไม่มีในโค้ด** (ไม่มีการแปะป้าย KNOWN/ASSUMED/UNKNOWN/VERIFIED ที่ใด) | ไม่มี | **สร้างใหม่: confidence-state tagging** (สคีมา + กฎ `ASSUMED != VERIFIED` ใน validator) |
+| 1 | Context (§3: compiler/cache/state) | `scripts/ctx_compiler.py` (`compile_task` แพ็กเกจลีน 7 ฟิลด์) + `scripts/ctx_cache.py` (lazy refresh, `stale` flag) — หลักฐาน `core-upgrade.md:1044–1061`: ลดโทเค็น **59.1% (587→240)**, ฮิตเรต **0.8 (`hits=8 misses=2`)**, อินวาลิเดต 3 สาย โกลบอลรอด; `test_lean_merge.py:38–69` ตรวจ 7 ฟิลด์ + `manager_validate` ผ่าน | มีแล้วส่วนใหญ่ | ขาด confidence tagging บน context (ยังไม่แปะ KNOWN/ASSUMED/UNKNOWN/VERIFIED) (อัปเดต: มีแล้ว — Phase 2 DONE: `confidence_tags` P2-01) |
+| 2 | Task Contract (§5) | `schema-task` + `manifest` (โครง Task ID/Objective/Inputs/Outputs/Dependencies/Files/Constraints/Acceptance/Verification/Risk ครบตามสเปก CU-01) — อ้าง `test_lean_merge.py:62,127–131` (`validate_completeness` ตรวจ `Task/Task.id/Task.acceptance`) | มีแล้วพื้นฐาน | ขาดฟิลด์ confidence-state ใน contract + การบังคับ `verification method` ทุกทาสก์ที่ไม่ใช่ LOW (อัปเดต: มีแล้ว — Phase 2 DONE: `confidence_tags` P2-01 + `task_contract` P2-02) |
+| 3 | Complexity Router (§6 + รูตติ้ง §15) | มีสเปกรูตติ้ง LOW/MEDIUM/HIGH ตาม §15 ของ Roadmap (เกณฑ์ `<3 files` = LOW; database/core/dependency = HIGH) แต่**ยังไม่มี classifier โค้ด** | ยังไม่มีโค้ด (อัปเดต: มีแล้ว — Phase 3 DONE: `task_levels` P3-01) | **สร้างใหม่: rule-based complexity classifier** (stdlib-only, รับ Task+Context+Changed Files → LOW/MEDIUM/HIGH) (อัปเดต: มีแล้ว — Phase 3 DONE) |
+| 4 | Plan Validator (§7) | `validate_completeness` (ctx_compiler) + `validate_dag` (dag_waves: missing/circular/wrong-order) + review gate (CRITICAL/HIGH outstanding → NOT DONE ห้ามบายพาส — `core-upgrade.md:1084`) | มีแล้วพื้นฐาน | ขาด completeness gate แบบไฟล์ (reject ไม่มี verification) + รายงานผลรวมศูนย์ (อัปเดต: มีแล้ว — Phase 4 DONE: `require_verification` P4-01) |
+| 5 | Scheduler + DAG (§8–§9) | `scripts/dag_waves.py` (`build_waves` + `assign` + `check_conflict` สองทิศ + `capacity_skips`) — หลักฐาน `core-upgrade.md:1065–1069` (เวฟ `[A,B,D]→[C]→[E]`, ชน 0 คู่, `capacity_hint=5`) และ `test_lean_merge.py:85–126` (topology + same-zone แยก 3 แบทช์ + capacity-bound นับ skips) | มีแล้ว | ขาด serialize/split-task policy เป็นลายลักษณ์อักษรเมื่อชน owns เดียวกัน (ตอนนี้แยกแบทช์เงียบ) (อัปเดต: มีแล้ว — Phase 5 DONE: `docs/ownership-policy.md`) |
+| 6 | Verification (§11) | ชุดเทส **161 เทส** (ชุดปัจจุบัน; เดิม 127 เทส) + เกต `VERIFYING` (ตรวจ tests/build/changed-files/acceptance/review ก่อน DONE) | มีแล้วพื้นฐาน | **สร้างใหม่: `verification-report.json`** ต่อรัน (ยังไม่มีไฟล์รวมศูนย์) (อัปเดต: มีแล้ว — Phase 6 DONE: `verify_report` P6-01) |
+| 7 | Recovery (§12) | `checkpoint` + `execution state` + `lease` + `events` (idempotent recovery; ตัด optimistic-rollback แล้วเพราะซับซ้อน — `core-upgrade.md:1090–1092`) | มีแล้วพื้นฐาน | ขาด failure classification ครบ 6 แบบ (TOKEN_LIMIT/MODEL_ERROR/CODE_ERROR/TEST_FAIL/CONFLICT + retry budget เป็นไฟล์) (อัปเดต: มีแล้ว — Phase 7 DONE: `failure_kinds` P7-01) |
+| 8 | Adaptive Parallelism (§10) | `capacity_hint` พื้นฐาน (`min(5,len)`, ไม่แตกแบทช์เกินจำเป็น — `core-upgrade.md:1069`) + เบนช์สเกล CU-09B ชี้ว่าคอขวดคือ `assign` (~75% ที่ N=1000) | มีแล้วพื้นฐาน | ขาดตัวเลือกจำนวน worker ตามสถานการณ์ (1/3/5 จาก task count + conflict risk + token budget) (อัปเดต: มีแล้ว — Phase 8 DONE worker_choice P8-01) |
+| 9 | Metrics/Observability (§13–§14) | `batch_seq` 3 เวลา (`queue_ms ~2.7 / compile_ms ~3.3 / persist_ms ~0.02` — `core-upgrade.md:1060–1081`) + เบนช์ 9 เคส (100/300/1000 × worker 1/3/5 — `CU-09B/results.md:14–24`, เคสหนักสุดรวม ~16ms) + `seq 1-5` + `heartbeat 3/3` + `snapshot N=10` | มีแล้วพื้นฐาน | **สร้างใหม่: `baseline-report.json`** (Phase 0) + ขยายเป็น LLM tokens/calls + success/retry ภายหลัง (อัปเดต: มีแล้ว — Phase 0 DONE: `baseline-report.json` + `collect_baseline`) |
+| 10 | Feedback Loop (§15) | events-driven พื้นฐาน (`batch_append` + snapshot + heartbeat → ปรับ context ภายหลังได้) แต่ยังไม่เต็มรูป | เริ่มต้นเท่านั้น (อัปเดต: มีแล้ว — Phase 9 DONE feedback_loop P9-01) | **สร้างใหม่: feedback loop เต็มรูป** (เก็บ Task/Plan/Execution/Result/Failure → ปรับ context จริง) |
+| 11 | Confidence States (§4) | **ยังไม่มีในโค้ด** (ไม่มีการแปะป้าย KNOWN/ASSUMED/UNKNOWN/VERIFIED ที่ใด) | ไม่มี (อัปเดต: มีแล้ว — Phase 2 DONE confidence_tags P2-01) | **สร้างใหม่: confidence-state tagging** (สคีมา + กฎ `ASSUMED != VERIFIED` ใน validator) |
 
 > ครบ 11 ส่วนตามที่สั่ง (Context / Contract / Router / Validator / Scheduler / Verification / Recovery / Parallelism / Metrics / Feedback / Confidence)
 
@@ -50,7 +50,7 @@
 | Phase 8 Parallelism | ต่อยอดเล็กน้อย | ตัวเลือก worker 1/3/5 จาก (task count + conflict risk + token budget) บน `capacity_hint` เดิม | ขึ้นกับ CU-09B bench | Manager | ไม่ช้ากว่า sequential; `assign` ไม่พุ่งที่ N=1000 |
 | Phase 9 Feedback | **สร้างใหม่** | **feedback loop เต็มรูป** (Task/Plan/Execution/Result/Failure → context improvement; ไม่เทรนโมเดล) | สุดท้าย (ขึ้นกับ Phase 6+Metrics) | Manager | มี pattern report 1 ชุดจากการรันจริง |
 
-**เฟสที่ต้องสร้างใหม่/ต่อยอดจริง: 6 เฟส** (0, 2, 3, 6, 8, 9) — ที่เหลือ (1, 4, 5, 7) ข้ามเพราะของมีแล้วคงเดิม
+**เฟสที่ต้องสร้างใหม่/ต่อยอดจริง: 6 เฟส** (0, 2, 3, 6, 8, 9) — ที่เหลือ (1, 4, 5, 7) ข้ามเพราะของมีแล้วคงเดิม (อัปเดต: สร้างครบแล้วทั้ง 6 เฟส)
 
 ---
 
@@ -75,3 +75,9 @@
 ---
 
 *ท้ายไฟล์ — พร้อมส่งรีวิว (Building Agent รับช่วงต่อเฉพาะงานสร้างใหม่ 6 เฟสข้างต้น)*
+
+---
+
+## สถานะปัจจุบัน
+
+คิวจบหมดแล้ว สวีต 161 เทสเขียวทั้งหมด เหลือแค่ข้อมูลโทเค็นจริงที่ยังเป็น llm UNKNOWN อย่างซื่อสัตย์ (รอวัดจากการรันจริงก่อนเคลมตัวเลข)

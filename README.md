@@ -23,10 +23,10 @@ run_dashboard.bat
 python scripts/metrics.py --rebuild   # compute from .agent/manager/*.jsonl
 python scripts/export_json.py         # → dashboard/data.json (single view)
 python scripts/aggregate.py           # → dashboard/all-projects.json (combined view)
-python -m http.server                 # open dashboard/*.html over http (do not open file:// directly, fetch gets blocked)
+python -m http.server --bind 127.0.0.1 --directory dashboard   # open dashboard/*.html over http (do not open file:// directly, fetch gets blocked)
 ```
 
-Run the test suite (161 tests: `test_logging` 29 + `test_hardening` 78 + `test_upgrade` 10 + `test_lean_merge` 44):
+Run the test suite (171 tests: `test_logging` 37 + `test_hardening` 77 + `test_upgrade` 10 + `test_lean_merge` 44 + 3):
 
 ```powershell
 pytest scripts/ -q   # or: python -m unittest discover -s scripts -p "test_*.py" (stdlib, no installs)
@@ -73,10 +73,10 @@ scripts/
   failure.py         # failure taxonomy + recovery analytics
   bench.py           # synthetic benchmarks (see docs/BENCHMARKS.md)
    bootstrap.py       # init .agent/ skeleton (+ --demo sample data)
-   test_logging.py    # 29 tests (schema + metrics + views)
-   test_hardening.py  # 78 tests (crash/recovery/lock/idempotent/user-guard)
+   test_logging.py    # 37 tests (schema + metrics + views)
+   test_hardening.py  # 77 tests (crash/recovery/lock/idempotent/user-guard)
    test_upgrade.py    # 10 tests (watchdog + recovery + queue)
-   test_lean_merge.py # 44 tests (14 lean modules merge)
+   test_lean_merge.py # 44 tests (14 lean modules merge) + 3 (171 total: 37+77+10+44+3)
    # 14 lean modules (pure, no I/O side effects):
    lean_flow.py / task_levels.py / task_contract.py / dag_waves.py
    batch_seq.py / worker_choice.py / ctx_cache.py / ctx_compiler.py

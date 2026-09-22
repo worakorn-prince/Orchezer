@@ -45,7 +45,7 @@ first — JSONL stays canonical until numbers say otherwise.
 
 ```powershell
 python scripts/bench.py --calls 10000
-python -m unittest discover -s scripts -p "test_logging.py"   # 21 tests incl. scale smoke
+python -m unittest discover -s scripts -p "test_logging.py"   # 37 tests incl. scale smoke
 ```
 
 ## Scheduler + telemetry benchmarks
@@ -56,3 +56,5 @@ python -m unittest discover -s scripts -p "test_logging.py"   # 21 tests incl. s
 เทเลเมทรี B: collector อ่านอย่างเดียว ไม่แตะงานผู้ใช้
 เทเลเมทรี C: gate ต่อเบสไลน์ก่อนผ่าน
 ดูผลเต็มใน `.agent/manager/tasks/CU-09B/results.md`
+หมายเหตุ: เบนช์ ~16ms กับ ~35ms คือคนละรอบรัน เทียบข้ามรอบไม่ได้โดยตรง
+ให้ยึดรอบ/คอมมิตเดียวกันเมื่อเทียบเลขเบนช์

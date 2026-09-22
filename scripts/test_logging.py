@@ -888,5 +888,53 @@ class TestLoggingIsolated(unittest.TestCase):
         self.assertEqual(totals["duplicate_worker_count"], 1)
         self.assertEqual(totals["data_loss_count"], 0)
 
+class TestSec01ServeBind(unittest.TestCase):
+    def test_sh_binds_loopback_and_dashboard_only(self):
+        path = os.path.join(ROOT, "run_dashboard.sh")
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("--bind", content)
+        self.assertIn("127.0.0.1", content)
+        self.assertIn("dashboard", content)
+
+    def test_ps1_binds_loopback_and_dashboard_only(self):
+        path = os.path.join(ROOT, "scripts", "run_dashboard.ps1")
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("--bind", content)
+        self.assertIn("127.0.0.1", content)
+        self.assertIn("dashboard", content)
+
+
+class TestSec01RedactSecrets(unittest.TestCase):
+    def _exported_error(self, raw_error):
+        toolcalls = [
+            {"time": "2026-09-14T08:00:00Z", "task": "TASK-SEC",
+             "operation": "CALL", "tool": "Bash", "duration_ms": 5,
+             "status": "error", "error": raw_error, "agent": "building"},
+        ]
+        extra = export_mod.build_extra([], toolcalls, {}, [], [], [], {}, [])
+        self.assertEqual(extra["errors"]["count"], 1)
+        return extra["errors"]["recent"][0]["error"]
+
+    def test_redact_denylist_keeps_readable(self):
+        raw = "call failed api_key=AKIA1234567890ABCDEF then password=supersecret123"
+        out = self._exported_error(raw)
+        self.assertNotIn("AKIA1234567890ABCDEF", out)
+        self.assertNotIn("supersecret123", out)
+        self.assertIn("[REDACTED]", out)
+        self.assertIn("api_key", out.lower())
+        self.assertLessEqual(len(out), 300)
+
+    def test_redact_bearer_and_long_key(self):
+        raw = "auth error Bearer abcdefghij1234567890 and key sk-abcdefghij1234567890 failed"
+        out = self._exported_error(raw)
+        self.assertNotIn("abcdefghij1234567890", out)
+        self.assertNotIn("sk-abcdefghij1234567890", out)
+        self.assertIn("[REDACTED]", out)
+        self.assertIn("failed", out)
+        self.assertLessEqual(len(out), 300)
+
+
 if __name__ == "__main__":
     unittest.main()

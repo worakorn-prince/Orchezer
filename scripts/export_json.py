@@ -43,6 +43,23 @@ SESSION_EVENTS = ("WORKER_STARTED", "WORKER_RESUMED")
 DONE_EVENT = "TASK_DONE"
 
 
+def redact_secrets(text):
+    import re
+    if not isinstance(text, str):
+        text = str(text or "")
+    redacted = re.sub(
+        r"(?i)(api_key|apikey|secret|password|passwd|pwd|token|bearer|authorization)\s*([:=]\s*|\\s+)(['\"]?)([^\s'\";,}]+)(['\"]?)",
+        lambda m: m.group(1) + m.group(2) + m.group(3) + "[REDACTED]" + m.group(5),
+        text,
+    )
+    redacted = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9\-._~+/=]+", "Bearer [REDACTED]", redacted)
+    redacted = re.sub(r"\bsk-[A-Za-z0-9\-_]{8,}", "[REDACTED]", redacted)
+    redacted = re.sub(r"\bgh[pousr]_[A-Za-z0-9]{8,}", "[REDACTED]", redacted)
+    redacted = re.sub(r"\bxox[bpas]-[A-Za-z0-9\-]{8,}", "[REDACTED]", redacted)
+    redacted = re.sub(r"\b[A-Za-z0-9_\-+/=]{20,}\b", "[REDACTED]", redacted)
+    return redacted
+
+
 def dump_json(payload, path):
     tool_calls = 0
     try:
@@ -141,8 +158,8 @@ def build_extra(events, toolcalls, queue, reviews, history, files_changed, confi
     errors = {
         "count": len(err_rows),
         "recent": [
-            {"time": r.get("time"), "task": r.get("task"),
-             "tool": r.get("tool"), "error": str(r.get("error") or "")[:300]}
+             {"time": r.get("time"), "task": r.get("task"),
+              "tool": r.get("tool"), "error": redact_secrets(str(r.get("error") or ""))[:300]}
             for r in err_rows[-FEED_LIMIT:]
         ][::-1],
     }

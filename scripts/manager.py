@@ -844,6 +844,9 @@ def log_dispatch(task_id, agent, session_id, attempt=1, prompt_text="", lease=No
         if _rt_task:
             _rt = check_routing(_rt_task, agent)
             if not _rt.get("allowed"):
+                if (_rt.get("action") or "").upper() == "BLOCKED":
+                    log_event("ROUTING", task_id, "routing blocked %s task to %s (owner=%s)" % (_rt.get("task_type"), _rt.get("agent"), _rt.get("owner")), {"action": "BLOCKED", "check": _rt, "agent": agent})
+                    return {"blocked": True, "action": "BLOCKED", "reason": _rt.get("reason")}
                 log_event("ROUTING", task_id, "routing misroute warn %s task to %s (owner=%s)" % (_rt.get("task_type"), _rt.get("agent"), _rt.get("owner")), {"action": "WARNING", "check": _rt, "agent": agent})
     except Exception:
         pass
@@ -898,6 +901,7 @@ def save_review(task_id, status, findings=None, reviewer="review"):
     findings = findings or []
     # FIX-10: unified severity CRITICAL/HIGH/MEDIUM/LOW — accept legacy critical/major/minor and map
     # Legacy mapping — backward compat, deprecate in v0.4 (remove major/minor after migration)
+    # NOTE: legacy major/minor accepted internally only, never shown to users.
     _legacy_map = {"critical": "CRITICAL", "major": "HIGH", "minor": "MEDIUM", "high": "HIGH", "medium": "MEDIUM", "low": "LOW"}
     normalized = []
     for f in findings:
@@ -910,7 +914,7 @@ def save_review(task_id, status, findings=None, reviewer="review"):
         elif sev.lower() in _legacy_map:
             f["severity"] = _legacy_map[sev.lower()]
         else:
-            raise ValueError("finding severity must be CRITICAL|HIGH|MEDIUM|LOW (or legacy critical|major|minor)")
+            raise ValueError("finding severity must be CRITICAL|HIGH|MEDIUM|LOW")
         normalized.append(f)
     findings = normalized
     record = {
@@ -1358,6 +1362,26 @@ def reconcile_state(state, lease=None):
                 _bump_state_version(state)
                 save_json(STATE_FILE, state)
     return True
+
+
+def _has_verifying_success(task_id):
+    try:
+        if not os.path.exists(EVENTS_FILE):
+            return False
+        with open(EVENTS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                if e.get("task") == task_id and e.get("event") == "VERIFYING_SUCCESS":
+                    return True
+    except Exception:
+        return False
+    return False
 
 
 class ManagerOrchestrator:
@@ -2112,6 +2136,9 @@ Session attempt incremented to {self.state['attempt']}.
             return False
         if isinstance(evidence, dict) and str(evidence.get("classification", "")).upper() == "UNKNOWN":
             log_event("COMPLETE_BLOCKED_UNKNOWN", task_id, "Complete blocked: classification UNKNOWN — forcing FAIL/block, never DONE")
+            return False
+        if not _has_verifying_success(task_id):
+            log_event("COMPLETE_BLOCKED", task_id, "Complete blocked: no VERIFYING_SUCCESS — refusing false DONE (false_done)")
             return False
         if not self.verify_completion(task_id, evidence):
             print(f"[COMPLETE] Cannot mark {task_id} as complete — evidence verification failed.")

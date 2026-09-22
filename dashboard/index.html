@@ -263,7 +263,7 @@ function renderExtra(data) {
   if (cap && !document.getElementById("find-sum")) {
     const p = document.createElement("p");
     p.id = "find-sum"; p.className = "muted";
-    p.textContent = "total critical=" + (sev.critical || 0) + " major=" + (sev.major || 0) + " minor=" + (sev.minor || 0);
+    p.textContent = "total CRITICAL=" + (sev.CRITICAL ?? sev.critical ?? 0) + " HIGH=" + (sev.HIGH ?? sev.major ?? 0) + " MEDIUM=" + (sev.MEDIUM ?? sev.minor ?? 0) + " LOW=" + (sev.LOW ?? 0);
     cap.after(p);
   }
   tb("tbl-tools", ((data.tools || {}).matrix || []).map(m =>

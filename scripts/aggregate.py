@@ -198,7 +198,15 @@ def build_payload(projects):
     risk_sessions = []
     failure_tasks = []
     contracts = []
-    sev_total = {"critical": 0, "major": 0, "minor": 0}
+    sev_total = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    _SEV_LEGACY = {"critical": "CRITICAL", "major": "HIGH", "minor": "MEDIUM",
+                   "high": "HIGH", "medium": "MEDIUM", "low": "LOW"}
+
+    def _norm_sev_key(key):
+        s = str(key or "").strip()
+        if s in sev_total:
+            return s
+        return _SEV_LEGACY.get(s.lower())
     files, agents, durations = {}, {}, {}
     slowest, trend_by_date = [], {}
     for c in ok:
@@ -219,8 +227,15 @@ def build_payload(projects):
             contracts.append({"project": c["name"], **c["contract"]})
         for f in (ex.get("findings", {}) or {}).get("recent", []) or []:
             findings_recent.append({"project": c["name"], **f})
-        for k, v in ((ex.get("findings", {}) or {}).get("by_severity", {}) or {}).items():
-            sev_total[k] = sev_total.get(k, 0) + int(v or 0)
+        raw_sev = ((ex.get("findings", {}) or {}).get("by_severity", {}) or {})
+        canon_present = {k for k in raw_sev if k in sev_total}
+        for k, v in raw_sev.items():
+            nk = _norm_sev_key(k)
+            if nk is None:
+                continue
+            if k not in sev_total and nk in canon_present:
+                continue
+            sev_total[nk] += int(v or 0)
         for f in ex.get("files_changed", []) or []:
             files[f] = files.get(f, 0) + 1
         for a in ex.get("agents", []) or []:
@@ -288,7 +303,8 @@ def build_payload(projects):
              "p95_ms": v["p95_max"]}
             for k, v in sorted(durations.items(), key=lambda kv: -kv[1]["calls"])[:10]]},
         "slowest_tasks": slowest,
-        "findings": {"total": sum(sev_total.values()), "by_severity": sev_total,
+        "findings": {"total": sum(sev_total.values()),
+                     "by_severity": {**sev_total},
                      "recent": sorted(findings_recent, key=lambda r: str(r.get("time") or ""),
                                       reverse=True)[:10]},
         "files_top": files_top,

@@ -464,7 +464,7 @@ class TestLoggingIsolated(unittest.TestCase):
         self.assertIn("QUEUE_BLOCKED", codes)
         self.assertEqual(extra["errors"]["count"], 1)
         self.assertEqual(extra["queue"]["by_status"]["blocked"], 1)
-        self.assertEqual(extra["findings"]["by_severity"]["major"], 1)
+        self.assertEqual(extra["findings"]["by_severity"]["HIGH"], 1)
         self.assertEqual(extra["tokens_total"], 10)
         tools = {d["tool"]: d for d in extra["durations"]["per_tool"]}
         self.assertEqual(tools["Bash"]["calls"], 2)
@@ -472,6 +472,31 @@ class TestLoggingIsolated(unittest.TestCase):
         ag = {a["agent"]: a for a in extra["agents"]}
         self.assertEqual(ag["building"]["sessions"], 1)
         self.assertEqual(ag["building"]["errors"], 1)
+
+    def test_i2_findings_canon_four_keys(self):
+        reviews = [{"task": "TASK-SEV", "time": "2020-01-02T00:00:00Z",
+                    "status": "failed",
+                    "findings": [{"severity": "CRITICAL", "file": "a.py", "issue": "c"},
+                                 {"severity": "HIGH", "file": "b.py", "issue": "h"},
+                                 {"severity": "MEDIUM", "file": "c.py", "issue": "m"},
+                                 {"severity": "LOW", "file": "d.py", "issue": "l"}]}]
+        extra = export_mod.build_extra([], [], {}, reviews, [],
+                                       [], {}, [])
+        self.assertEqual(set(extra["findings"]["by_severity"].keys()),
+                         {"CRITICAL", "HIGH", "MEDIUM", "LOW"})
+        self.assertEqual(extra["findings"]["total"], 4)
+
+    def test_i3_findings_legacy_tolerant(self):
+        reviews = [{"task": "TASK-SEV", "time": "2020-01-02T00:00:00Z",
+                    "status": "failed",
+                    "findings": [{"severity": "major", "file": "a.py", "issue": "h"},
+                                 {"severity": "minor", "file": "b.py", "issue": "m"},
+                                 {"severity": "critical", "file": "c.py", "issue": "c"}]}]
+        extra = export_mod.build_extra([], [], {}, reviews, [],
+                                       [], {}, [])
+        self.assertEqual(extra["findings"]["by_severity"]["HIGH"], 1)
+        self.assertEqual(extra["findings"]["by_severity"]["MEDIUM"], 1)
+        self.assertEqual(extra["findings"]["by_severity"]["CRITICAL"], 1)
 
     def test_j_aggregate_two_projects(self):
         projs = []
@@ -934,6 +959,33 @@ class TestSec01RedactSecrets(unittest.TestCase):
         self.assertIn("[REDACTED]", out)
         self.assertIn("failed", out)
         self.assertLessEqual(len(out), 300)
+
+
+class TestVer01WriteReport(unittest.TestCase):
+    def test_ver01_write_valid_roundtrip(self):
+        import verify_report as vr_mod
+        rep = vr_mod.build_report(
+            {"passed": 33, "failed": 0, "total": 33},
+            True,
+            ["scripts/verify_report.py", "scripts/test_logging.py"],
+            {"all_met": True},
+            {"status": "PASS"},
+        )
+        self.assertTrue(vr_mod.valid_report(rep))
+        self.assertEqual(rep["verdict"], "PASS")
+        with tempfile.TemporaryDirectory(prefix="ver01-") as tmp:
+            path = os.path.join(tmp, "verification-report.json")
+            vr_mod.write_report(rep, path)
+            with open(path, "r", encoding="utf-8") as f:
+                on_disk = json.load(f)
+            self.assertEqual(on_disk, rep)
+
+    def test_ver01_write_invalid_raises(self):
+        import verify_report as vr_mod
+        with tempfile.TemporaryDirectory(prefix="ver01-") as tmp:
+            path = os.path.join(tmp, "bad-report.json")
+            with self.assertRaises(ValueError):
+                vr_mod.write_report({"verdict": "PASS"}, path)
 
 
 if __name__ == "__main__":

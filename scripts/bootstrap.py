@@ -83,7 +83,7 @@ def demo_rows(now):
         {"event": "WORKER_STARTED", "task": "TASK-002", "time": t(105),
          "session": "ses-demo-2", "agent": "building", "attempt": 1},
         {"event": "REVIEW_FAILED", "task": "TASK-002", "time": t(60),
-         "findings": [{"severity": "major", "file": "demo.py",
+         "findings": [{"severity": "HIGH", "file": "demo.py",
                        "issue": "missing validation",
                        "required_action": "add validation"}]},
         {"event": "WORKER_RESUMED", "task": "TASK-002", "time": t(55),
@@ -166,7 +166,7 @@ def main(argv=None):
         metrics_mod.METRICS_FILE = os.path.join(mgr, "metrics.json")
         metrics_mod.HISTORY_DIR = os.path.join(mgr, "history")
         manager_mod.save_review("TASK-002", "failed", findings=[
-            {"severity": "major", "file": "demo.py", "issue": "missing validation",
+            {"severity": "HIGH", "file": "demo.py", "issue": "missing validation",
              "required_action": "add validation"}])
         metrics_mod.rebuild()
         export_mod.export_data(

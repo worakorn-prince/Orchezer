@@ -209,17 +209,30 @@ def build_extra(events, toolcalls, queue, reviews, history, files_changed, confi
             failed.append(t.get("id"))
     queue_info = {"by_status": by_status, "blocked": blocked, "failed": failed}
 
-    sev_total = {"critical": 0, "major": 0, "minor": 0}
+    _SEV_CANON = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+    _SEV_LEGACY = {"critical": "CRITICAL", "major": "HIGH", "minor": "MEDIUM",
+                   "high": "HIGH", "medium": "MEDIUM", "low": "LOW"}
+
+    def _norm_sev(value, default="MEDIUM"):
+        s = str(value if value is not None else default).strip()
+        if s in _SEV_CANON:
+            return s
+        mapped = _SEV_LEGACY.get(s.lower())
+        return mapped if mapped else default
+
+    sev_total = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
     findings_recent = []
     for rec in sorted(reviews, key=lambda r: str(r.get("time") or "")):
         for f in rec.get("findings", []) or []:
-            sev_total[f.get("severity", "minor")] = sev_total.get(f.get("severity", "minor"), 0) + 1
+            sev = _norm_sev((f or {}).get("severity"), "MEDIUM")
+            sev_total[sev] += 1
             findings_recent.append({
                 "task": rec.get("task"), "time": rec.get("time"),
-                "status": rec.get("status"), "severity": f.get("severity"),
+                "status": rec.get("status"), "severity": sev,
                 "file": f.get("file"), "issue": str(f.get("issue") or "")[:200],
             })
-    findings = {"total": sum(sev_total.values()), "by_severity": sev_total,
+    findings = {"total": sum(sev_total.values()),
+                "by_severity": {**sev_total},
                 "recent": findings_recent[-10:][::-1]}
 
     max_cycles = ((config or {}).get("limits", {}) or {}).get("max_review_cycles", 3)

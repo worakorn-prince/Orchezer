@@ -79,6 +79,7 @@ source of truth. Delete any generated file and rebuild it with one command.
 | `bootstrap.py` | — | skeleton `.agent/` (+ `--demo` sample data, `--config` copies, `--sync` runs sqlite_sync) |
 | `sqlite_sync.py` | events.jsonl + queue.json + checkpoint | `.agent/manager/manager_index.db` (incremental via last_seq, `--rebuild` full, `--dry-run` preview) |
 | `bench.py` | synthetic tmp logs | timing/memory table to stdout (+ `test_hardening` / `test_upgrade` cover recovery) |
+| `cli.py` + `orchezer.bat` / `orchezer` | user command line | zero-install entry (`orchezer init --demo`); dispatches init/sync/metrics/export/aggregate to module mains, no own logic |
 
 ## Dashboard views
 

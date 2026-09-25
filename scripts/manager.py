@@ -259,6 +259,32 @@ def reconcile_started_operations(task_id=None):
 BASELINE_DIR = os.path.join(MANAGER_DIR, "baselines")
 
 
+def _baseline_attempt_path(task_id, attempt):
+    return os.path.join(BASELINE_DIR, f"{task_id}.attempt-{int(attempt):03d}.json")
+
+
+def _existing_attempts(task_id):
+    try:
+        files = os.listdir(BASELINE_DIR)
+    except Exception:
+        return []
+    prefix = f"{task_id}.attempt-"
+    out = []
+    for fn in files:
+        if fn.startswith(prefix) and fn.endswith(".json"):
+            mid = fn[len(prefix):-len(".json")]
+            try:
+                out.append(int(mid))
+            except Exception:
+                continue
+    return sorted(out)
+
+
+def _latest_attempt(task_id):
+    ex = _existing_attempts(task_id)
+    return max(ex) if ex else None
+
+
 def _hash_file(path):
     try:
         h = hashlib.sha256()
@@ -270,11 +296,21 @@ def _hash_file(path):
         return None
 
 
-def capture_baseline(task_id):
+def capture_baseline(task_id, attempt=None):
     """FIX-07: Capture baseline at TASK START — git status + file hashes."""
     os.makedirs(BASELINE_DIR, exist_ok=True)
+    if attempt is None:
+        _latest = _latest_attempt(task_id)
+        attempt = (_latest + 1) if _latest else 1
+    attempt = int(attempt)
+    _target = _baseline_attempt_path(task_id, attempt)
+    while os.path.exists(_target):
+        attempt += 1
+        _target = _baseline_attempt_path(task_id, attempt)
+        log_event("BASELINE_ATTEMPT_BUMP", task_id, f"Baseline attempt bumped to {attempt}", {"attempt": attempt, "baseline_path": _target})
     baseline = {
         "task_id": task_id,
+        "attempt": attempt,
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "git_status": "",
         "git_diff_stat": "",
@@ -304,24 +340,35 @@ def capture_baseline(task_id):
                     baseline["file_hashes"][fp] = h
     except Exception:
         pass
-    path = os.path.join(BASELINE_DIR, f"{task_id}.json")
+    path = _target
     save_json(path, baseline)
-    log_event("BASELINE_CAPTURED", task_id, f"Baseline captured {len(baseline['file_hashes'])} files", {"baseline_path": path})
+    log_event("BASELINE_CAPTURED", task_id, f"Baseline captured {len(baseline['file_hashes'])} files", {"baseline_path": path, "attempt": attempt})
     return baseline
 
 
-def load_baseline(task_id):
-    path = os.path.join(BASELINE_DIR, f"{task_id}.json")
-    return load_json(path, None)
+def load_baseline(task_id, attempt=None):
+    if attempt is not None:
+        try:
+            attempt = int(attempt)
+        except Exception:
+            return None
+        return load_json(_baseline_attempt_path(task_id, attempt), None)
+    latest = _latest_attempt(task_id)
+    if latest is not None:
+        data = load_json(_baseline_attempt_path(task_id, latest), None)
+        if data is not None:
+            return data
+    flat = os.path.join(BASELINE_DIR, f"{task_id}.json")
+    return load_json(flat, None)
 
 
-def classify_changes(task_id, checkpoint_files=None):
+def classify_changes(task_id, checkpoint_files=None, attempt=None):
     """FIX-08 + FIX-V2-12: checkpoint files_changed is hint only, never authority.
     Ground truth order: baseline + current git diff > checkpoint list.
     Missing baseline -> conservative BLOCKED.
     Returns verdict + winner + conflicting files list (+ worker/user/unknown for compat).
     """
-    baseline = load_baseline(task_id)
+    baseline = load_baseline(task_id, attempt=attempt)
     if not baseline:
         return {"verdict": "BLOCKED", "reason": "no baseline", "worker": [], "user": [], "unknown": [], "checkpoint_files": checkpoint_files or [], "conflicting": [], "winner": "none"}
     current_status = ""
@@ -929,11 +976,11 @@ def log_dispatch(task_id, agent, session_id, attempt=1, prompt_text="", lease=No
     except Exception:
         pass
     try:
-        capture_baseline(task_id)
+        capture_baseline(task_id, attempt=attempt)
     except Exception:
         pass
     try:
-        _cls = classify_changes(task_id)
+        _cls = classify_changes(task_id, attempt=attempt)
         _pol = resolve_file_policy(_cls)
         _action = (_pol.get("action") or "").upper()
         if _action == "BLOCKED":
@@ -1924,7 +1971,8 @@ class ManagerOrchestrator:
             print(f"[RECOVERY] Classification UNKNOWN for {task_id} — route to error_debug classify")
             return {"task_id": task_id, "status": "classify", "route": "ERROR_DEBUG", "classification": "UNKNOWN", "recovery_plan": plan or {"action": "CLASSIFY_ONLY", "forbid": ["destructive", "building", "done"]}}
         try:
-            _cls2 = classify_changes(task_id)
+            _att = (evidence or {}).get("attempt") or (evidence or {}).get("baseline_attempt") or self.state.get("worker_attempt") or self.state.get("attempt")
+            _cls2 = classify_changes(task_id, attempt=_att)
             _pol2 = resolve_file_policy(_cls2)
             _act2 = (_pol2.get("action") or "").upper()
             _diff2 = _pol2.get("diff", _cls2.get("diff") if isinstance(_cls2, dict) else None)

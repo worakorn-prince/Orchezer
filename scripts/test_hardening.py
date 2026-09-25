@@ -820,11 +820,12 @@ class IsolatedManagerTest(unittest.TestCase):
         mgr_mod.BASELINE_DIR = os.path.join(self.tmpdir, "baselines")
         try:
             log_dispatch("TEST-V212-DISPATCH", "building", "sess-v212-a", attempt=1, prompt_text="hi")
-            path = os.path.join(mgr_mod.BASELINE_DIR, "TEST-V212-DISPATCH.json")
+            path = os.path.join(mgr_mod.BASELINE_DIR, "TEST-V212-DISPATCH.attempt-001.json")
             self.assertTrue(os.path.exists(path))
             data = load_json(path, None)
             self.assertIsNotNone(data)
             self.assertIn("git_status", data)
+            self.assertEqual(data.get("attempt"), 1)
         finally:
             mgr_mod.BASELINE_DIR = orig_base
 
@@ -832,9 +833,9 @@ class IsolatedManagerTest(unittest.TestCase):
         orig_base = mgr_mod.BASELINE_DIR
         mgr_mod.BASELINE_DIR = os.path.join(self.tmpdir, "baselines")
         try:
-            capture_baseline("TEST-V212-LIE")
+            capture_baseline("TEST-V212-LIE", attempt=1)
             lying = "__lying_file_xyz_v212__.txt"
-            res = classify_changes("TEST-V212-LIE", checkpoint_files=[lying])
+            res = classify_changes("TEST-V212-LIE", checkpoint_files=[lying], attempt=1)
             self.assertEqual(res.get("verdict"), "OK")
             self.assertEqual(res.get("winner"), "git")
             self.assertIn(lying, res.get("conflicting", []))
@@ -851,6 +852,88 @@ class IsolatedManagerTest(unittest.TestCase):
             self.assertEqual(res.get("verdict"), "BLOCKED")
             self.assertEqual(res.get("reason"), "no baseline")
         finally:
+            mgr_mod.BASELINE_DIR = orig_base
+
+    def test_FIXV212_dispatch_three_attempts(self):
+        orig_base = mgr_mod.BASELINE_DIR
+        mgr_mod.BASELINE_DIR = os.path.join(self.tmpdir, "baselines")
+        try:
+            for i in (1, 2, 3):
+                log_dispatch("TEST-V212-3ATT", "building", f"sess-v212-3att-{i}", attempt=i, prompt_text="hi")
+            for i in (1, 2, 3):
+                path = os.path.join(mgr_mod.BASELINE_DIR, f"TEST-V212-3ATT.attempt-{i:03d}.json")
+                self.assertTrue(os.path.exists(path))
+                data = load_json(path, None)
+                self.assertIsNotNone(data)
+                self.assertEqual(data.get("attempt"), i)
+        finally:
+            mgr_mod.BASELINE_DIR = orig_base
+
+    def test_FIXV212_baseline_immutable_bump(self):
+        orig_base = mgr_mod.BASELINE_DIR
+        mgr_mod.BASELINE_DIR = os.path.join(self.tmpdir, "baselines")
+        try:
+            first = capture_baseline("TEST-V212-BUMP", attempt=1)
+            p1 = os.path.join(mgr_mod.BASELINE_DIR, "TEST-V212-BUMP.attempt-001.json")
+            before = load_json(p1, None)
+            second = capture_baseline("TEST-V212-BUMP", attempt=1)
+            p2 = os.path.join(mgr_mod.BASELINE_DIR, "TEST-V212-BUMP.attempt-002.json")
+            self.assertTrue(os.path.exists(p1))
+            self.assertTrue(os.path.exists(p2))
+            self.assertEqual(second.get("attempt"), 2)
+            after = load_json(p1, None)
+            self.assertEqual(before, after)
+        finally:
+            mgr_mod.BASELINE_DIR = orig_base
+
+    def test_FIXV212_load_latest_and_flat_fallback(self):
+        orig_base = mgr_mod.BASELINE_DIR
+        mgr_mod.BASELINE_DIR = os.path.join(self.tmpdir, "baselines")
+        try:
+            capture_baseline("TEST-V212-LATEST", attempt=1)
+            capture_baseline("TEST-V212-LATEST", attempt=2)
+            latest = mgr_mod.load_baseline("TEST-V212-LATEST")
+            self.assertIsNotNone(latest)
+            self.assertEqual(latest.get("attempt"), 2)
+            first = mgr_mod.load_baseline("TEST-V212-LATEST", attempt=1)
+            self.assertIsNotNone(first)
+            self.assertEqual(first.get("attempt"), 1)
+            flat_task = "TEST-V212-FLATONLY"
+            flat_path = os.path.join(mgr_mod.BASELINE_DIR, f"{flat_task}.json")
+            save_json(flat_path, {"task_id": flat_task, "attempt": 1, "git_status": "", "file_hashes": {}})
+            flat = mgr_mod.load_baseline(flat_task)
+            self.assertIsNotNone(flat)
+            self.assertEqual(flat.get("task_id"), flat_task)
+        finally:
+            mgr_mod.BASELINE_DIR = orig_base
+
+    def test_FIXV212_recovery_forwards_attempt(self):
+        orig_base = mgr_mod.BASELINE_DIR
+        mgr_mod.BASELINE_DIR = os.path.join(self.tmpdir, "baselines")
+        orig_classify = mgr_mod.classify_changes
+        try:
+            capture_baseline("TEST-V212-SPY", attempt=2)
+            seen = {}
+            def spy(task_id, checkpoint_files=None, attempt=None):
+                seen["task_id"] = task_id
+                seen["attempt"] = attempt
+                return orig_classify(task_id, checkpoint_files=checkpoint_files, attempt=attempt)
+            mgr_mod.classify_changes = spy
+            import manager as _mgr_alias
+            _mgr_alias.classify_changes = spy
+            mgr = ManagerOrchestrator()
+            mgr.state["worker_attempt"] = 99
+            mgr.state["attempt"] = 99
+            try:
+                mgr.execute_recovery("TEST-V212-SPY", classification="FAILED", evidence={"attempt": 2, "classification": "FAILED"})
+            except Exception:
+                pass
+            self.assertEqual(seen.get("task_id"), "TEST-V212-SPY")
+            self.assertEqual(seen.get("attempt"), 2)
+        finally:
+            mgr_mod.classify_changes = orig_classify
+            import manager as _mgr_alias2
+            _mgr_alias2.classify_changes = orig_classify
             mgr_mod.BASELINE_DIR = orig_base
 
 

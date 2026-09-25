@@ -1,0 +1,4 @@
+#!/bin/sh
+# orchezer - zero-install CLI entry point (macOS/Linux).
+# Usage: ./orchezer init --demo   (or: sh orchezer init --demo)
+python3 "$(dirname "$0")/scripts/cli.py" "$@"

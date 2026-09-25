@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "memory": {
+      "command": "node",
+      "args": ["<path-to-memory-mcp>/dist/index.js"],
+      "env": {
+        "MEMORY_DB_PATH": "<path-to-data>/memory.db"
+      }
+    }
+  }
+}

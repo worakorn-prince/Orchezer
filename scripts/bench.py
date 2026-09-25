@@ -135,7 +135,7 @@ def bench_scale(n_calls, tmpbase):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Scopeboard benchmarks (synthetic, tmp-only)")
+    parser = argparse.ArgumentParser(description="Orchezer benchmarks (synthetic, tmp-only)")
     parser.add_argument("--calls", default="100000,500000,1000000",
                         help="Comma-separated tool-call scales")
     parser.add_argument("--out", default=None, help="Write results JSON here")

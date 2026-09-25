@@ -163,6 +163,15 @@ def read_snapshot_via_db(db_path, events_path, queue_path):
             if last_seq < line_count:
                 return (None, None)
             try:
+                cur = conn.execute("SELECT key, value FROM sync_meta WHERE key IN ('source_events_mtime', 'source_events_bytes')")
+                src = {k: v for k, v in cur.fetchall()}
+                if int(float(src.get("source_events_mtime", "-1"))) != int(os.path.getmtime(events_path)):
+                    return (None, None)
+                if int(src.get("source_events_bytes", "-1")) != int(os.path.getsize(events_path)):
+                    return (None, None)
+            except Exception:
+                return (None, None)
+            try:
                 cur = conn.execute("SELECT raw_json FROM events ORDER BY seq")
                 event_rows = cur.fetchall()
             except Exception:

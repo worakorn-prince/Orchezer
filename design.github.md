@@ -1,4 +1,4 @@
-# Scopeboard — Viewer Design Notes
+# Orchezer — Viewer Design Notes
 
 Short design doc for the **standalone viewer**. No framework, no orchestration —
 just files in, dashboards out.

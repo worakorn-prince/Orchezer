@@ -64,12 +64,12 @@ def build_markdown(payload, mode="single"):
     # if all mode, per_project is projects
     combined = payload.get("combined") if is_all else None
     generated = payload.get("generated_at", datetime.now(timezone.utc).isoformat())
-    title = "Scopeboard Report — Combined Projects" if is_all else "Scopeboard Report — Single Project"
+    title = "Orchezer Report — Combined Projects" if is_all else "Orchezer Report — Single Project"
     project_name = payload.get("project", "Agent") if not is_all else f"{len(payload.get('per_project', []))} projects"
 
     md = f"# {title}\n\n"
     md += f"> Generated: {generated} | Project: {project_name} | Mode: {mode}\n\n"
-    md += "> Scopeboard — Observability Dashboard (file-based, stdlib only) — 19 sections derived from `dashboard/data.json`\n\n"
+    md += "> Orchezer — Observability Dashboard (file-based, stdlib only) — 19 sections derived from `dashboard/data.json`\n\n"
 
     # 1 KPIs
     md += _h2("1. KPIs")
@@ -305,7 +305,7 @@ def export_pdf(payload, out_path, mode="single"):
         from reportlab.pdfgen import canvas  # type: ignore
         from reportlab.lib.pagesizes import A4
         c = canvas.Canvas(pdf_path, pagesize=A4)
-        c.drawString(30, 800, "Scopeboard Report — see HTML for full content")
+        c.drawString(30, 800, "Orchezer Report — see HTML for full content")
         c.drawString(30, 780, f"Generated: {datetime.now(timezone.utc).isoformat()}")
         c.save()
         print(f"[EXPORT] PDF via reportlab (stub) -> {pdf_path}")
@@ -319,7 +319,7 @@ def export_pdf(payload, out_path, mode="single"):
 def build_html(payload, mode="single"):
     md = build_markdown(payload, mode)
     # very simple markdown to HTML (headers + tables remain as text, but printable)
-    html = f"""<!doctype html><meta charset=\"utf-8\"><title>Scopeboard Report</title>
+    html = f"""<!doctype html><meta charset=\"utf-8\"><title>Orchezer Report</title>
 <style>
 body{{font-family:Segoe UI, sans-serif; margin:40px; color:#111}}
 h1{{border-bottom:2px solid #222; padding-bottom:8px}}
@@ -337,7 +337,7 @@ pre{{background:#f6f8fa; padding:12px; overflow:auto}}
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Scopeboard Markdown/PDF export (stdlib only)")
+    ap = argparse.ArgumentParser(description="Orchezer Markdown/PDF export (stdlib only)")
     ap.add_argument("--format", choices=["md", "pdf", "both", "html"], default="md", help="output format")
     ap.add_argument("--out", dest="out", default=None, help="output path (dir or file)")
     ap.add_argument("--all", action="store_true", help="use all-projects.json (combined) instead of data.json")

@@ -1,4 +1,4 @@
-# Scopeboard — Observability Dashboard
+# Orchezer — Observability Dashboard
 
 File-based observability dashboards (pure Python stdlib — no `pip install`)
 for project task / tool-call / session history, across projects.
@@ -16,6 +16,16 @@ run_dashboard.bat
 - If real data already exists (`./.agent/`), drop `--demo` (the script never touches existing files)
 - The browser opens the **combined view** (`dashboard/all.html`); the
   **single-project view** is `dashboard/index.html`
+
+## Agent config (per-project install)
+
+```bat
+copy opencode.json.example opencode.json
+copy .mcp.json.example .mcp.json
+```
+
+Then edit the placeholders inside to match your machine. Each project folder
+needs its own copies plus a `./.agent/` runtime dir (created on first run).
 
 ## Manual run (without the one-click script)
 

@@ -1,4 +1,4 @@
-# Scopeboard Benchmarks (roadmap section 12, P2)
+# Orchezer Benchmarks (roadmap section 12, P2)
 
 All runs use **synthetic logs in a temp dir** (`scripts/bench.py --calls N`) —
 real `.agent/` data is never touched. Each scale splits calls across 3

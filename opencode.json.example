@@ -1,0 +1,1 @@
+{"$schema": "https://opencode.ai/config.json", "mcp": {"memory": {"type": "local", "command": ["node", "<path-to-memory-mcp>/dist/index.js"], "enabled": true, "environment": {"MEMORY_DB_PATH": "<path-to-data>/memory.db"}}}}

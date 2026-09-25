@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import argparse
+import sqlite3
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -12,6 +13,8 @@ TOOLCALLS_FILE = os.path.join(MANAGER_DIR, "tool-calls.jsonl")
 METRICS_FILE = os.path.join(MANAGER_DIR, "metrics.json")
 HISTORY_DIR = os.path.join(MANAGER_DIR, "history")
 HISTORY_KEEP_DAYS = 90
+DB_PATH = os.path.join(MANAGER_DIR, "manager_index.db")
+DB_MAX_AGE_SECONDS = 3600
 
 SESSION_EVENTS = ("WORKER_STARTED", "WORKER_RESUMED")
 WORKER_STARTED_EVENT = "WORKER_STARTED"
@@ -43,7 +46,7 @@ def read_jsonl(path):
     if not os.path.exists(path):
         return []
     rows = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -53,6 +56,57 @@ def read_jsonl(path):
             except Exception:
                 continue
     return rows
+
+
+def read_events_via_db(db_path, events_path):
+    try:
+        if not db_path or not os.path.exists(db_path):
+            return None
+        try:
+            with open(events_path, "r", encoding="utf-8-sig") as f:
+                line_count = sum(1 for _ in f)
+        except FileNotFoundError:
+            line_count = 0
+        except Exception:
+            return None
+        conn = sqlite3.connect("file:%s?mode=ro" % os.path.abspath(db_path), uri=True, timeout=5)
+        try:
+            try:
+                cur = conn.execute("SELECT key, value FROM sync_meta WHERE key IN ('last_sync_at', 'last_seq')")
+                meta = {k: v for k, v in cur.fetchall()}
+            except Exception:
+                return None
+            last_sync_at = parse_time(meta.get("last_sync_at"))
+            if last_sync_at is None:
+                return None
+            age = (datetime.now(timezone.utc) - last_sync_at).total_seconds()
+            if age < 0 or age >= DB_MAX_AGE_SECONDS:
+                return None
+            try:
+                last_seq = int(meta.get("last_seq", "0"))
+            except Exception:
+                return None
+            if last_seq < line_count:
+                return None
+            try:
+                cur = conn.execute("SELECT raw_json FROM events ORDER BY seq")
+                rows = cur.fetchall()
+            except Exception:
+                return None
+            events = []
+            for (raw,) in rows:
+                try:
+                    events.append(json.loads(raw))
+                except Exception:
+                    continue
+            return events
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        return None
 
 
 def parse_time(value):
@@ -267,8 +321,16 @@ def save_snapshot(totals):
         pass
 
 
-def rebuild(task_filter=None):
-    events = read_jsonl(EVENTS_FILE)
+def rebuild(task_filter=None, db_path=None, use_db=True):
+    events = None
+    source = "jsonl"
+    if use_db:
+        events = read_events_via_db(db_path or DB_PATH, EVENTS_FILE)
+        if events is not None:
+            source = "db"
+    if events is None:
+        events = read_jsonl(EVENTS_FILE)
+    print("source=%s" % source, file=sys.stderr)
     toolcalls = read_jsonl(TOOLCALLS_FILE)
     per_task, totals, efficiency, agent_efficiency = compute_metrics(events, toolcalls)
     payload = {
@@ -300,8 +362,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Offline metrics from events.jsonl + tool-calls.jsonl")
     parser.add_argument("--rebuild", action="store_true", help="Recompute all metrics and rewrite metrics.json (idempotent)")
     parser.add_argument("--task", default=None, help="Show only TASK-xxx in summary")
+    parser.add_argument("--db", default=DB_PATH, help="SQLite read-model path")
+    parser.add_argument("--no-db", action="store_true", help="Force reading from JSONL files")
     args = parser.parse_args(argv)
-    rebuild(task_filter=args.task)
+    rebuild(task_filter=args.task, db_path=args.db, use_db=not args.no_db)
     return 0
 
 

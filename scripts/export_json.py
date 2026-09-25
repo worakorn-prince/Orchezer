@@ -3,6 +3,7 @@ import sys
 import json
 import glob
 import argparse
+import sqlite3
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +18,8 @@ REVIEWS_DIR = os.path.join(MANAGER_DIR, "reviews")
 HISTORY_DIR = os.path.join(MANAGER_DIR, "history")
 CHECKPOINT_FILE = os.path.join(ROOT, ".agent", "building", "checkpoint.json")
 DEFAULT_OUT = os.path.join(ROOT, "dashboard", "data.json")
+DB_PATH = os.path.join(MANAGER_DIR, "manager_index.db")
+DB_MAX_AGE_SECONDS = 3600
 
 try:
     from tools_inventory import build_tools_section
@@ -93,7 +96,7 @@ def read_jsonl(path):
     if not os.path.exists(path):
         return []
     rows = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -126,6 +129,71 @@ def read_history(history_dir):
             snaps.append(s)
     snaps.sort(key=lambda s: s.get("date", ""))
     return snaps
+
+
+def read_snapshot_via_db(db_path, events_path, queue_path):
+    try:
+        if not db_path or not os.path.exists(db_path):
+            return (None, None)
+        try:
+            with open(events_path, "r", encoding="utf-8-sig") as f:
+                line_count = sum(1 for _ in f)
+        except FileNotFoundError:
+            line_count = 0
+        except Exception:
+            return (None, None)
+        conn = sqlite3.connect("file:%s?mode=ro" % os.path.abspath(db_path), uri=True, timeout=5)
+        try:
+            try:
+                cur = conn.execute("SELECT key, value FROM sync_meta WHERE key IN ('last_sync_at', 'last_seq')")
+                meta = {k: v for k, v in cur.fetchall()}
+            except Exception:
+                return (None, None)
+            last_sync_at = parse_time(meta.get("last_sync_at"))
+            if last_sync_at is None:
+                return (None, None)
+            age = (datetime.now(timezone.utc) - last_sync_at).total_seconds()
+            if age < 0 or age >= DB_MAX_AGE_SECONDS:
+                return (None, None)
+            try:
+                last_seq = int(meta.get("last_seq", "0"))
+            except Exception:
+                return (None, None)
+            if last_seq < line_count:
+                return (None, None)
+            try:
+                cur = conn.execute("SELECT raw_json FROM events ORDER BY seq")
+                event_rows = cur.fetchall()
+            except Exception:
+                return (None, None)
+            events = []
+            for (raw,) in event_rows:
+                try:
+                    events.append(json.loads(raw))
+                except Exception:
+                    continue
+            try:
+                cur = conn.execute("SELECT raw_json FROM queue_snapshot")
+                qrows = cur.fetchall()
+            except Exception:
+                return (None, None)
+            tasks = []
+            for (raw,) in qrows:
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    continue
+                if isinstance(obj, dict):
+                    tasks.append(obj)
+            queue = {"tasks": tasks}
+            return (events, queue)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception:
+        return (None, None)
 
 
 def parse_time(value):
@@ -431,7 +499,8 @@ def build_payload(metrics, events, toolcalls=None, queue=None, reviews=None,
 
 def export_data(out_path, metrics_path=METRICS_FILE, events_path=EVENTS_FILE,
                 toolcalls_path=None, queue_path=None, reviews_dir=None,
-                history_dir=None, checkpoint_path=None, config_path=None):
+                history_dir=None, checkpoint_path=None, config_path=None,
+                db_path=None, use_db=True):
     toolcalls_path = toolcalls_path or TOOLCALLS_FILE
     queue_path = queue_path or QUEUE_FILE
     reviews_dir = reviews_dir or REVIEWS_DIR
@@ -439,9 +508,21 @@ def export_data(out_path, metrics_path=METRICS_FILE, events_path=EVENTS_FILE,
     checkpoint_path = checkpoint_path or CHECKPOINT_FILE
     config_path = config_path or CONFIG_FILE
     metrics = load_json(metrics_path, default=None)
-    events = read_jsonl(events_path)
+    events = None
+    queue = None
+    source = "jsonl"
+    if use_db:
+        db_events, db_queue = read_snapshot_via_db(db_path or DB_PATH, events_path, queue_path)
+        if db_events is not None and db_queue is not None:
+            events = db_events
+            queue = db_queue
+            source = "db"
+    if events is None:
+        events = read_jsonl(events_path)
+    if queue is None:
+        queue = load_json(queue_path, default={}) or {}
+    print("source=%s" % source, file=sys.stderr)
     toolcalls = read_jsonl(toolcalls_path)
-    queue = load_json(queue_path, default={}) or {}
     reviews = read_reviews(reviews_dir)
     history = read_history(history_dir)
     checkpoint = load_json(checkpoint_path, default={}) or {}
@@ -465,8 +546,11 @@ def main(argv=None):
     parser.add_argument("--out", default=DEFAULT_OUT, help="Output data.json path")
     parser.add_argument("--metrics", default=METRICS_FILE, help="Input metrics.json path")
     parser.add_argument("--events", default=EVENTS_FILE, help="Input events.jsonl path")
+    parser.add_argument("--db", default=DB_PATH, help="SQLite read-model path")
+    parser.add_argument("--no-db", action="store_true", help="Force reading from JSON files")
     args = parser.parse_args(argv)
-    export_data(args.out, metrics_path=args.metrics, events_path=args.events)
+    export_data(args.out, metrics_path=args.metrics, events_path=args.events,
+                db_path=args.db, use_db=not args.no_db)
     return 0
 
 

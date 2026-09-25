@@ -61,7 +61,7 @@ python scripts/aggregate.py           # → dashboard/all-projects.json (combine
 python -m http.server --bind 127.0.0.1 --directory dashboard   # open dashboard/*.html over http (do not open file:// directly, fetch gets blocked)
 ```
 
-Run the test suite (177 tests: `test_logging` 37 + `test_hardening` 77 + `test_upgrade` 10 + `test_lean_merge` 44 + `test_cli` 6 + 3):
+Run the test suite (283 tests: `test_logging` 37 + `test_hardening` 176 + `test_upgrade` 10 + `test_lean_merge` 44 + `test_cli` 6 + `test_sync` 7 + `test_gates` 3):
 
 ```powershell
 pytest scripts/ -q   # or: python -m unittest discover -s scripts -p "test_*.py" (stdlib, no installs)
@@ -138,10 +138,11 @@ scripts/
   bench.py           # synthetic benchmarks (see docs/BENCHMARKS.md)
    bootstrap.py       # init .agent/ skeleton (+ --demo sample data)
    test_logging.py    # 37 tests (schema + metrics + views)
-   test_hardening.py  # 77 tests (crash/recovery/lock/idempotent/user-guard)
+   test_hardening.py  # 176 collected (77 base + FIX002/003/004 suites incl. inherited re-runs)
    test_upgrade.py    # 10 tests (watchdog + recovery + queue)
-   test_lean_merge.py # 44 tests (14 lean modules merge) + 3 (177 total: 37+77+10+44+6+3)
+   test_lean_merge.py # 44 tests (14 lean modules merge) + 3 (283 total: 37+176+10+44+6+7+3)
    test_cli.py        # 6 tests (orchezer CLI dispatcher)
+   test_sync.py       # 7 tests (JSONL integrity matrix)
    # 14 lean modules (pure, no I/O side effects):
    lean_flow.py / task_levels.py / task_contract.py / dag_waves.py
    batch_seq.py / worker_choice.py / ctx_cache.py / ctx_compiler.py

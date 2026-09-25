@@ -1,5 +1,29 @@
+"""Sync JSON source-of-truth into SQLite read-model.
+
+Contract (Fix v1 P1 S14): the JSONL event log is the append-only
+source of truth. Once written, a record must never be edited in
+place, rewritten, or reordered; new facts are appended as new lines.
+SQLite (``manager_index.db``) is only a derived read-model cache
+built from JSONL via this script and can always be rebuilt from
+scratch with ``--rebuild``.
+
+Rewrite detection (Fix v1 P1 S15): incremental sync keyed on line
+numbers alone cannot see a rewrite that keeps the line count (for
+example ``A,B,C`` edited to ``A,B',C``). This module therefore
+stores ``content_hash`` (sha256 of the raw file bytes) and
+``synced_lines`` (physical line count at sync time) in ``sync_meta``.
+On the next run the stored hash is compared against the current
+file: fewer lines, a different hash at equal line count, or a
+different prefix hash over the first ``synced_lines`` lines all mean
+the source was rewritten or truncated, and the sync falls back to a
+full rebuild. Databases written before these keys existed have no
+stored hash, so they rebuild once on the next run and are current
+from then on.
+"""
+
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import sqlite3
@@ -109,6 +133,64 @@ def _get_last_seq(conn):
         return int(row[0]) if row else 0
     except (sqlite3.Error, ValueError, TypeError):
         return 0
+
+
+def _get_sync_meta(conn):
+    try:
+        cur = conn.execute("SELECT key, value FROM sync_meta")
+        return {k: v for k, v in cur.fetchall()}
+    except sqlite3.Error:
+        return {}
+
+
+def _read_file_bytes(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+
+
+def _sha256_hex(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _prefix_hash(data, n_lines):
+    if n_lines <= 0:
+        return _sha256_hex(b"")
+    chunks = data.splitlines(keepends=True)
+    return _sha256_hex(b"".join(chunks[:n_lines]))
+
+
+def _detect_rewrite(conn, events_path, start_seq, current_lines):
+    meta = _get_sync_meta(conn)
+    stored_hash = meta.get("content_hash")
+    stored_lines = None
+    if meta.get("synced_lines") is not None:
+        try:
+            stored_lines = int(meta["synced_lines"])
+        except (ValueError, TypeError):
+            stored_lines = None
+    if current_lines < start_seq:
+        return True, "shrink"
+    if stored_hash is None or stored_lines is None:
+        if start_seq > 0:
+            return True, "missing-integrity-meta"
+        return False, ""
+    if current_lines < stored_lines:
+        return True, "shrink"
+    data = _read_file_bytes(events_path)
+    if data is None:
+        data = b""
+    if current_lines == stored_lines:
+        if _sha256_hex(data) != stored_hash:
+            return True, "content-changed"
+        return False, ""
+    if _prefix_hash(data, stored_lines) != stored_hash:
+        return True, "prefix-rewrite"
+    return False, ""
 
 
 def sync_events(conn, events_path, full, start_seq):
@@ -257,6 +339,10 @@ def update_sync_meta(conn, stats):
             kv["source_events_bytes"] = str(os.path.getsize(stats["events_path"]))
         except OSError:
             pass
+    if stats.get("content_hash") is not None:
+        kv["content_hash"] = stats["content_hash"]
+    if stats.get("synced_lines") is not None:
+        kv["synced_lines"] = str(stats["synced_lines"])
     with conn:
         conn.executemany(
             "INSERT OR REPLACE INTO sync_meta(key,value) VALUES(?,?)",
@@ -306,7 +392,8 @@ def main(argv=None):
         else:
             start_seq = _get_last_seq(conn)
             current_lines = _count_lines(args.events)
-            if current_lines < start_seq:
+            rewritten, _reason = _detect_rewrite(conn, args.events, start_seq, current_lines)
+            if rewritten:
                 with conn:
                     conn.execute("DELETE FROM events")
                     conn.execute("DELETE FROM queue_snapshot")
@@ -318,11 +405,16 @@ def main(argv=None):
         cp_ok = sync_checkpoint(conn, args.checkpoint)
         cur = conn.execute("SELECT COALESCE(MAX(seq),0) FROM events")
         last_seq = cur.fetchone()[0]
+        raw_bytes = _read_file_bytes(args.events)
+        if raw_bytes is None:
+            raw_bytes = b""
         update_sync_meta(conn, {
             "last_seq": last_seq,
             "corrupt_lines": corrupt,
             "events_path": args.events,
             "queue_path": args.queue,
+            "content_hash": _sha256_hex(raw_bytes),
+            "synced_lines": _count_lines(args.events),
         })
         cur = conn.execute("SELECT task FROM checkpoints LIMIT 1")
         row = cur.fetchone()

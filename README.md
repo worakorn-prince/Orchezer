@@ -6,6 +6,13 @@ Works with any harness or framework — just write logs in the schema below.
 
 ## Get started in 2 steps (after cloning)
 
+Clone:
+
+```bat
+git clone https://github.com/worakorn-prince/Orchezer.git
+cd Orchezer
+```
+
 ```bat
 python scripts\bootstrap.py --demo
 run_dashboard.bat
@@ -26,6 +33,14 @@ copy .mcp.json.example .mcp.json
 
 Then edit the placeholders inside to match your machine. Each project folder
 needs its own copies plus a `./.agent/` runtime dir (created on first run).
+
+Or via the installer (same result, per-project with `--root`):
+
+```bat
+python scripts\bootstrap.py --config --set MEMORY_MCP_DIR=D:/tools/memory-mcp --demo --sync
+```
+
+Requires Python 3.10+, stdlib only (no `pip install`).
 
 ## Manual run (without the one-click script)
 

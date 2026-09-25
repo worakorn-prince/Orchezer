@@ -3,9 +3,12 @@
 ใช้:
   python scripts/bootstrap.py                 # สร้างโครง .agent/ + config ตั้งต้น (ไม่แตะของเดิม)
   python scripts/bootstrap.py --demo          # แถมข้อมูลตัวอย่าง → เปิดจอเห็นกราฟทันที
+  python scripts/bootstrap.py --config        # แถมก๊อปปี้ opencode.json/.mcp.json จาก .example
+  python scripts/bootstrap.py --config --set MEMORY_MCP_DIR=D:/tools/memory-mcp --set DATA_DIR=D:/data
+  python scripts/bootstrap.py --config --demo --sync   # ติดตั้งเต็ม + sync sqlite read-model
   python scripts/bootstrap.py --force         # เขียนทับไฟล์เดิมทั้งหมด
 
-ไม่ต้อง pip install อะไร (stdlib ล้วน) รันจากที่ไหนก็ได้ด้วย --root
+ไม่ต้อง pip install อะไร (stdlib ล้วน, Python 3.10+) รันจากที่ไหนก็ได้ด้วย --root
 """
 import os
 import sys
@@ -124,15 +127,105 @@ def demo_rows(now):
     return events, calls
 
 
+CONFIG_COPIES = (
+    ("opencode.json.example", "opencode.json"),
+    (".mcp.json.example", ".mcp.json"),
+)
+
+PLACEHOLDER_BY_KEY = {
+    "MEMORY_MCP_DIR": "<path-to-memory-mcp>",
+    "MEMORY_DATA_DIR": "<path-to-data>",
+    "DATA_DIR": "<path-to-data>",
+}
+
+
+def parse_set_item(item):
+    if "=" not in item:
+        raise ValueError(f"--set must be KEY=VALUE (got {item!r})")
+    key, value = item.split("=", 1)
+    key = key.strip()
+    if not key or not value:
+        raise ValueError(f"--set must be non-empty KEY=VALUE (got {item!r})")
+    return key, value
+
+
+def apply_sets(text, sets):
+    for key, value in sets:
+        placeholder = PLACEHOLDER_BY_KEY.get(key, f"<{key}>")
+        text = text.replace(placeholder, value)
+    return text
+
+
+def install_configs(root, force, sets):
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo = os.path.dirname(here)
+    for src_name, dst_name in CONFIG_COPIES:
+        dst = os.path.join(root, dst_name)
+        if os.path.exists(dst) and not force:
+            print(f"  skip (exists): {dst}")
+            continue
+        src = os.path.join(repo, src_name)
+        try:
+            with open(src, encoding="utf-8-sig") as f:
+                text = f.read()
+        except FileNotFoundError:
+            print(f"  warn: template not found {src}, skip {dst_name}")
+            continue
+        if sets:
+            text = apply_sets(text, sets)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"  wrote: {dst}")
+        if "<path-to-" in text or "<path-to-data>" in text:
+            print(f"  warn: {dst_name} still has placeholders (<path-to-...>); edit manually or re-run with --set KEY=VALUE")
+
+
+def run_sync(root):
+    mgr = os.path.join(root, ".agent", "manager")
+    scripts_dir = os.path.join(root, "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    try:
+        import sqlite_sync as sync_mod
+    except Exception as exc:
+        print(f"  warn: --sync skipped (cannot load sqlite_sync: {exc})")
+        return
+    try:
+        rc = sync_mod.main([
+            "--events", os.path.join(mgr, "events.jsonl"),
+            "--queue", os.path.join(mgr, "queue.json"),
+            "--checkpoint", os.path.join(root, ".agent", "building", "checkpoint.json"),
+            "--db", os.path.join(mgr, "manager_index.db"),
+        ])
+    except Exception as exc:
+        print(f"  warn: --sync failed but continue ({exc})")
+        return
+    if rc != 0:
+        print(f"  warn: --sync exited with code {rc} but continue")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Init project for dashboard viewing")
     parser.add_argument("--root", default=os.path.dirname(HERE),
                         help="Project root (default: parent of scripts/)")
     parser.add_argument("--demo", action="store_true",
                         help="Also write sample data so graphs show immediately")
+    parser.add_argument("--config", action="store_true",
+                        help="Also copy opencode.json/.mcp.json from .example files")
+    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                        help="Replace placeholders in config (repeatable)")
+    parser.add_argument("--sync", action="store_true",
+                        help="Run sqlite_sync incremental after install (warn-and-continue on failure)")
     parser.add_argument("--force", action="store_true",
                         help="Overwrite existing files")
     args = parser.parse_args(argv)
+    if args.set and not args.config:
+        parser.error("--set requires --config")
+    try:
+        sets = [parse_set_item(item) for item in args.set]
+    except ValueError as exc:
+        parser.error(str(exc))
     root = os.path.abspath(args.root)
     mgr = os.path.join(root, ".agent", "manager")
     now = datetime.now(timezone.utc)
@@ -149,6 +242,9 @@ def main(argv=None):
         "progress": {"last_progress_at": now.isoformat()},
         "updated_at": now.isoformat(),
     }, args.force)
+
+    if args.config:
+        install_configs(root, args.force, sets)
 
     if args.demo:
         events, calls = demo_rows(now)
@@ -179,6 +275,9 @@ def main(argv=None):
             history_dir=os.path.join(mgr, "history"),
             checkpoint_path=os.path.join(root, ".agent", "building", "checkpoint.json"),
             config_path=os.path.join(mgr, "config.json"))
+
+    if args.sync:
+        run_sync(root)
 
     print("[bootstrap] done. Next: run_dashboard.bat (or: python scripts/metrics.py "
           "--rebuild; python scripts/export_json.py; python -m http.server)")

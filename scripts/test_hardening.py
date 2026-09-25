@@ -19,6 +19,7 @@ from manager import (
     get_operation, create_operation, check_operation_before,
     validate_state_event_consistency, reconcile_state,
     transition_state, log_dispatch, _coerce_token, StaleLeaseError,
+    transition_task_status, transition_manager_phase,
     STATE_FILE, QUEUE_FILE, CHECKPOINT_FILE, LOCK_FILE, OPERATIONS_FILE, EVENTS_FILE,
 )
 
@@ -266,11 +267,11 @@ class IsolatedManagerTest(unittest.TestCase):
         self.assertIn("user", cls)
 
     def test_T19_verification_unavailable(self):
-        """T19: verification provider unavailable → fallback to evidence gate
+        """T19: verification provider unavailable → explicit not-passed verdict
 
     GIVEN: Tmp config with verification disabled for TEST-T19.
-    WHEN: Resolve provider and verify with fallback evidence gate.
-    THEN: Falls back to evidence gate without raising; returns a verdict.
+    WHEN: Resolve provider and verify with explicit status semantics.
+    THEN: Returns not-passed (DISABLED) without raising; message keeps skip note.
     EXPECTED INVARIANTS: Uses tmp config only; real config untouched; deterministic.
     """
         # set verification disabled
@@ -284,7 +285,7 @@ class IsolatedManagerTest(unittest.TestCase):
         mgr_mod.CONFIG_FILE = tmp_cfg
         try:
             ok, reason = verify_with_provider("TEST-T19")
-            self.assertTrue(ok)
+            self.assertFalse(ok)
             self.assertIn("skipped", reason)
         finally:
             mgr_mod.CONFIG_FILE = old_cfg_file
@@ -1112,8 +1113,11 @@ class IsolatedManagerTest(unittest.TestCase):
         mgr_mod.CONFIG_FILE = cfg_path
         try:
             ok, reason = mgr_mod.verify_with_provider("TEST-V221-BOOM", {})
-            self.assertTrue(ok)
+            self.assertFalse(ok)
             self.assertIn("unavailable", str(reason).lower())
+            res = mgr_mod.verify_status("TEST-V221-BOOM", {})
+            self.assertEqual(res.status, "ERROR")
+            self.assertFalse(res.passed)
         finally:
             mgr_mod.CONFIG_FILE = orig_cfg
             mgr_mod._VERIFICATION_REGISTRY.pop("tmp-boom-221", None)
@@ -1123,6 +1127,203 @@ class IsolatedManagerTest(unittest.TestCase):
         src = (_inspect.getsource(mgr_mod.verify_with_provider) + _inspect.getsource(mgr_mod.get_verification_provider)).lower()
         for w in ["pytest", "npm", "which", "subprocess"]:
             self.assertNotIn(w, src)
+
+    def test_FIX002_verify_status_pass(self):
+        orig_cfg = mgr_mod.CONFIG_FILE
+        class _Fake(mgr_mod.VerificationProvider):
+            name = "tmp-fix002-pass"
+            def can_verify(self, config=None):
+                return True
+            def verify(self, task_id, evidence=None, config=None):
+                return {"status": "pass", "provider": self.name, "detail": "fake-ok"}
+        mgr_mod.register_verification_provider(_Fake())
+        cfg_path = os.path.join(self.tmpdir, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"verification": {"enabled": True, "provider": "tmp-fix002-pass"}}))
+        mgr_mod.CONFIG_FILE = cfg_path
+        try:
+            res = mgr_mod.verify_status("TEST-FIX002-PASS", {})
+            self.assertEqual(res.status, "PASS")
+            self.assertTrue(res.passed)
+            ok, _ = mgr_mod.verify_with_provider("TEST-FIX002-PASS", {})
+            self.assertTrue(ok)
+        finally:
+            mgr_mod.CONFIG_FILE = orig_cfg
+            mgr_mod._VERIFICATION_REGISTRY.pop("tmp-fix002-pass", None)
+
+    def test_FIX002_verify_status_fail(self):
+        orig_cfg = mgr_mod.CONFIG_FILE
+        class _Fake(mgr_mod.VerificationProvider):
+            name = "tmp-fix002-fail"
+            def can_verify(self, config=None):
+                return True
+            def verify(self, task_id, evidence=None, config=None):
+                return {"status": "fail", "provider": self.name, "detail": "fake-bad"}
+        mgr_mod.register_verification_provider(_Fake())
+        cfg_path = os.path.join(self.tmpdir, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"verification": {"enabled": True, "provider": "tmp-fix002-fail"}}))
+        mgr_mod.CONFIG_FILE = cfg_path
+        try:
+            res = mgr_mod.verify_status("TEST-FIX002-FAIL", {})
+            self.assertEqual(res.status, "FAIL")
+            self.assertFalse(res.passed)
+            ok, _ = mgr_mod.verify_with_provider("TEST-FIX002-FAIL", {})
+            self.assertFalse(ok)
+        finally:
+            mgr_mod.CONFIG_FILE = orig_cfg
+            mgr_mod._VERIFICATION_REGISTRY.pop("tmp-fix002-fail", None)
+
+    def test_FIX002_verify_status_unavailable(self):
+        orig_cfg = mgr_mod.CONFIG_FILE
+        class _Fake(mgr_mod.VerificationProvider):
+            name = "tmp-fix002-unavail"
+            def can_verify(self, config=None):
+                return False
+            def verify(self, task_id, evidence=None, config=None):
+                return {"status": "pass", "provider": self.name, "detail": "should-not-run"}
+        mgr_mod.register_verification_provider(_Fake())
+        cfg_path = os.path.join(self.tmpdir, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"verification": {"enabled": True, "provider": "tmp-fix002-unavail"}}))
+        mgr_mod.CONFIG_FILE = cfg_path
+        try:
+            res = mgr_mod.verify_status("TEST-FIX002-UNAVAIL", {})
+            self.assertEqual(res.status, "UNAVAILABLE")
+            self.assertFalse(res.passed)
+            ok, _ = mgr_mod.verify_with_provider("TEST-FIX002-UNAVAIL", {})
+            self.assertFalse(ok)
+        finally:
+            mgr_mod.CONFIG_FILE = orig_cfg
+            mgr_mod._VERIFICATION_REGISTRY.pop("tmp-fix002-unavail", None)
+
+    def test_FIX002_verify_status_unknown_provider_unavailable(self):
+        orig_cfg = mgr_mod.CONFIG_FILE
+        cfg_path = os.path.join(self.tmpdir, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"verification": {"enabled": True, "provider": "tmp-fix002-no-such"}}))
+        mgr_mod.CONFIG_FILE = cfg_path
+        try:
+            res = mgr_mod.verify_status("TEST-FIX002-UNKNOWN", {})
+            self.assertEqual(res.status, "UNAVAILABLE")
+            self.assertFalse(res.passed)
+            ok, _ = mgr_mod.verify_with_provider("TEST-FIX002-UNKNOWN", {})
+            self.assertFalse(ok)
+        finally:
+            mgr_mod.CONFIG_FILE = orig_cfg
+
+    def test_FIX002_verify_status_disabled(self):
+        orig_cfg = mgr_mod.CONFIG_FILE
+        cfg_path = os.path.join(self.tmpdir, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"verification": {"enabled": False, "provider": "pytest"}}))
+        mgr_mod.CONFIG_FILE = cfg_path
+        try:
+            res = mgr_mod.verify_status("TEST-FIX002-DISABLED", {})
+            self.assertEqual(res.status, "DISABLED")
+            self.assertFalse(res.passed)
+            ok, reason = mgr_mod.verify_with_provider("TEST-FIX002-DISABLED", {})
+            self.assertFalse(ok)
+            self.assertIn("skipped", str(reason).lower())
+        finally:
+            mgr_mod.CONFIG_FILE = orig_cfg
+
+    def test_FIX002_verify_status_exception_is_error(self):
+        orig_cfg = mgr_mod.CONFIG_FILE
+        class _Boom(mgr_mod.VerificationProvider):
+            name = "tmp-fix002-boom"
+            def can_verify(self, config=None):
+                return True
+            def verify(self, task_id, evidence=None, config=None):
+                raise RuntimeError("boom")
+        mgr_mod.register_verification_provider(_Boom())
+        cfg_path = os.path.join(self.tmpdir, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"verification": {"enabled": True, "provider": "tmp-fix002-boom"}}))
+        mgr_mod.CONFIG_FILE = cfg_path
+        try:
+            res = mgr_mod.verify_status("TEST-FIX002-BOOM", {})
+            self.assertEqual(res.status, "ERROR")
+            self.assertFalse(res.passed)
+            ok, _ = mgr_mod.verify_with_provider("TEST-FIX002-BOOM", {})
+            self.assertFalse(ok)
+        finally:
+            mgr_mod.CONFIG_FILE = orig_cfg
+            mgr_mod._VERIFICATION_REGISTRY.pop("tmp-fix002-boom", None)
+
+    def test_FIX002_verify_status_malformed_is_error(self):
+        orig_cfg = mgr_mod.CONFIG_FILE
+        payloads = [
+            ["not-a-dict"],
+            {"provider": "tmp-fix002-malformed"},
+            {"status": None, "provider": "tmp-fix002-malformed"},
+            {"status": 42, "provider": "tmp-fix002-malformed"},
+        ]
+        for i, payload in enumerate(payloads):
+            name = "tmp-fix002-malformed-%d" % i
+            cls = type("_Malformed%d" % i, (mgr_mod.VerificationProvider,), {
+                "name": name,
+                "can_verify": lambda self, config=None: True,
+                "verify": (lambda p: (lambda self, task_id, evidence=None, config=None: p))(payload),
+            })
+            mgr_mod.register_verification_provider(cls())
+            cfg_path = os.path.join(self.tmpdir, "config.json")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"verification": {"enabled": True, "provider": name}}))
+            mgr_mod.CONFIG_FILE = cfg_path
+            try:
+                res = mgr_mod.verify_status("TEST-FIX002-MALFORMED", {})
+                self.assertEqual(res.status, "ERROR", "payload %r" % (payload,))
+                self.assertFalse(res.passed)
+                ok, _ = mgr_mod.verify_with_provider("TEST-FIX002-MALFORMED", {})
+                self.assertFalse(ok)
+            finally:
+                mgr_mod.CONFIG_FILE = orig_cfg
+                mgr_mod._VERIFICATION_REGISTRY.pop(name, None)
+
+    def test_FIX002_verify_status_case_insensitive(self):
+        orig_cfg = mgr_mod.CONFIG_FILE
+        cases = [("PASSED", "PASS"), ("Passed", "PASS"), ("FAILED", "FAIL"), ("Failed", "FAIL"), ("UNAVAILABLE", "UNAVAILABLE"), ("Disabled", "DISABLED")]
+        for i, (raw, expected) in enumerate(cases):
+            name = "tmp-fix002-case-%d" % i
+            cls = type("_Case%d" % i, (mgr_mod.VerificationProvider,), {
+                "name": name,
+                "can_verify": lambda self, config=None: True,
+                "verify": (lambda r: (lambda self, task_id, evidence=None, config=None: {"status": r, "provider": self.name, "detail": "case"}))(raw),
+            })
+            mgr_mod.register_verification_provider(cls())
+            cfg_path = os.path.join(self.tmpdir, "config.json")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"verification": {"enabled": True, "provider": name}}))
+            mgr_mod.CONFIG_FILE = cfg_path
+            try:
+                res = mgr_mod.verify_status("TEST-FIX002-CASE", {})
+                self.assertEqual(res.status, expected, "raw %r" % raw)
+            finally:
+                mgr_mod.CONFIG_FILE = orig_cfg
+                mgr_mod._VERIFICATION_REGISTRY.pop(name, None)
+
+    def test_FIX002_verify_with_provider_only_pass_true(self):
+        orig_cfg = mgr_mod.CONFIG_FILE
+        mapping = [("pass", True), ("fail", False), ("unavailable", False), ("disabled", False), ("error", False)]
+        for i, (raw, expected_ok) in enumerate(mapping):
+            name = "tmp-fix002-policy-%d" % i
+            cls = type("_Policy%d" % i, (mgr_mod.VerificationProvider,), {
+                "name": name,
+                "can_verify": lambda self, config=None: True,
+                "verify": (lambda r: (lambda self, task_id, evidence=None, config=None: {"status": r, "provider": self.name, "detail": "policy"}))(raw),
+            })
+            mgr_mod.register_verification_provider(cls())
+            cfg_path = os.path.join(self.tmpdir, "config.json")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"verification": {"enabled": True, "provider": name}}))
+            mgr_mod.CONFIG_FILE = cfg_path
+            try:
+                ok, _ = mgr_mod.verify_with_provider("TEST-FIX002-POLICY", {})
+                self.assertEqual(ok, expected_ok, "raw %r" % raw)
+            finally:
+                mgr_mod.CONFIG_FILE = orig_cfg
+                mgr_mod._VERIFICATION_REGISTRY.pop(name, None)
 
     def test_FIXV227_p0_green_proceeds(self):
         m = mgr_mod.ManagerOrchestrator(owner="test-V227-green")
@@ -1354,6 +1555,97 @@ class TestInvariantDocstrings(unittest.TestCase):
         section = text[anchor:]
         for name in ("Phase1-6", "U1-U7", "P0-P2", "FIX-1-5", "FIX-V2-01-29"):
             self.assertIn(name, section, "missing legacy mapping: %s" % name)
+
+class TestFIX003CentralTransition(IsolatedManagerTest):
+    def test_FIX003_task_valid(self):
+        t = {"id": "TEST-FIX003-A", "status": "pending"}
+        ok, _ = transition_task_status(t, "ready")
+        self.assertTrue(ok)
+        self.assertEqual(t["status"], "ready")
+        t2 = {"id": "TEST-FIX003-B", "status": "pending"}
+        ok2, _ = transition_task_status(t2, "cancelled")
+        self.assertTrue(ok2)
+        self.assertEqual(t2["status"], "cancelled")
+        t3 = {"id": "TEST-FIX003-C", "status": "ready"}
+        ok3, _ = transition_task_status(t3, "cancelled")
+        self.assertTrue(ok3)
+        self.assertEqual(t3["status"], "cancelled")
+
+    def test_FIX003_task_ready_completed_with_gate(self):
+        t = {"id": "TEST-FIX003-GATE", "status": "ready"}
+        ok, reason = transition_task_status(t, "completed")
+        self.assertFalse(ok)
+        self.assertIn("verification", reason.lower())
+        self.assertEqual(t["status"], "ready")
+        ok2, _ = transition_task_status(t, "completed", {"verified": True})
+        self.assertTrue(ok2)
+        self.assertEqual(t["status"], "completed")
+
+    def test_FIX003_task_ready_completed_via_event(self):
+        log_event("VERIFYING_SUCCESS", "TEST-FIX003-EV", "gate ok")
+        t = {"id": "TEST-FIX003-EV", "status": "ready"}
+        ok, _ = transition_task_status(t, "completed")
+        self.assertTrue(ok)
+        self.assertEqual(t["status"], "completed")
+
+    def test_FIX003_task_invalid(self):
+        t = {"id": "TEST-FIX003-INV", "status": "pending"}
+        ok, reason = transition_task_status(t, "completed", {"verified": True})
+        self.assertFalse(ok)
+        self.assertEqual(t["status"], "pending")
+        with open(self.tmp_events, encoding="utf-8") as f:
+            self.assertIn("TRANSITION_REJECTED", f.read())
+
+    def test_FIX003_task_terminal(self):
+        for cur in ("completed", "cancelled"):
+            t = {"id": "TEST-FIX003-T-%s" % cur, "status": cur}
+            ok, reason = transition_task_status(t, "ready")
+            self.assertFalse(ok)
+            self.assertIn("terminal", reason.lower())
+            self.assertEqual(t["status"], cur)
+            ok2, _ = transition_task_status(t, cur)
+            self.assertFalse(ok2)
+            self.assertEqual(t["status"], cur)
+
+    def test_FIX003_phase_valid(self):
+        s = {"phase": "building", "current_task_id": "TEST-FIX003-P"}
+        ok, _ = transition_manager_phase(s, "verifying")
+        self.assertTrue(ok)
+        self.assertEqual(s["phase"], "verifying")
+        s2 = {"phase": "verifying", "current_task_id": "TEST-FIX003-P2"}
+        ok2, _ = transition_manager_phase(s2, "reviewing")
+        self.assertTrue(ok2)
+        self.assertEqual(s2["phase"], "reviewing")
+        s3 = {"phase": "recovering", "current_task_id": "TEST-FIX003-P3"}
+        ok3, _ = transition_manager_phase(s3, "blocked")
+        self.assertTrue(ok3)
+        self.assertEqual(s3["phase"], "blocked")
+
+    def test_FIX003_phase_invalid(self):
+        s = {"phase": "building", "current_task_id": "TEST-FIX003-PI"}
+        ok, _ = transition_manager_phase(s, "reviewing")
+        self.assertFalse(ok)
+        self.assertEqual(s["phase"], "building")
+        with open(self.tmp_events, encoding="utf-8") as f:
+            self.assertIn("TRANSITION_REJECTED", f.read())
+
+    def test_FIX003_phase_terminal(self):
+        for cur in ("completed", "blocked"):
+            s = {"phase": cur, "current_task_id": "TEST-FIX003-T-%s" % cur}
+            ok, reason = transition_manager_phase(s, "building")
+            self.assertFalse(ok)
+            self.assertIn("terminal", reason.lower())
+            self.assertEqual(s["phase"], cur)
+
+    def test_FIX003_phase_completed_precondition(self):
+        s = {"phase": "verifying", "current_task_id": "TEST-FIX003-PC"}
+        ok, _ = transition_manager_phase(s, "completed", {"verified": False})
+        self.assertFalse(ok)
+        self.assertEqual(s["phase"], "verifying")
+        ok2, _ = transition_manager_phase(s, "completed", {"verified": True})
+        self.assertTrue(ok2)
+        self.assertEqual(s["phase"], "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

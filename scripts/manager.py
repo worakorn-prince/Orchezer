@@ -516,35 +516,113 @@ def get_verification_provider():
     }
 
 
-def verify_with_provider(task_id, evidence=None):
+class VerificationResult:
+    VALID_STATUSES = ("PASS", "FAIL", "UNAVAILABLE", "DISABLED", "ERROR")
+    def __init__(self, status, message="", provider=""):
+        s = str(status or "").strip().upper()
+        if s not in self.VALID_STATUSES:
+            s = "ERROR"
+        self.status = s
+        self.message = str(message or "")
+        self.provider = str(provider or "")
+    @property
+    def passed(self):
+        return self.status == "PASS"
+    def to_tuple(self):
+        return (self.status == "PASS", self.message)
+    def __repr__(self):
+        return "VerificationResult(status=%r, provider=%r, message=%r)" % (self.status, self.provider, self.message)
+
+
+def _normalize_provider_status(raw):
+    if not isinstance(raw, str):
+        return None
+    t = raw.strip().lower()
+    if not t:
+        return None
+    if t in ("pass", "passed", "ok", "success"):
+        return "PASS"
+    if t in ("fail", "failed", "failure"):
+        return "FAIL"
+    if t in ("unavailable", "not-available", "not_available", "n/a", "na"):
+        return "UNAVAILABLE"
+    if t in ("disabled", "skipped", "skip"):
+        return "DISABLED"
+    if t in ("error", "exception", "unknown", "unknown-state", "unknown_state"):
+        return "ERROR"
+    return "ERROR"
+
+
+def verify_status(task_id, evidence=None):
+    """Resolve provider and return explicit VerificationResult.
+
+    Policy default (Manager/Gate decides, verifier does not):
+    only status PASS counts as passed; every other status
+    (FAIL/UNAVAILABLE/DISABLED/ERROR) counts as not-passed.
+    Provider status is normalized case-insensitively; malformed
+    responses (non-dict, missing/non-string status) and any
+    exception map to ERROR, never to a pass fallback.
+    """
     provider_cfg = get_verification_provider()
-    if not provider_cfg["enabled"]:
-        log_event("VERIFY_PROVIDER_SKIP", task_id, "Verification provider disabled", provider_cfg)
-        return True, "skipped (disabled)"
     selected = provider_cfg["provider"]
+    cfg_detail = provider_cfg.get("config", {})
+    if not provider_cfg["enabled"]:
+        log_event("VERIFY_PROVIDER_SKIP", task_id, "skipped (disabled)", provider_cfg)
+        return VerificationResult("DISABLED", "skipped (disabled)", selected)
+    instance = _VERIFICATION_REGISTRY.get(selected)
+    if instance is None:
+        log_event("VERIFY_PROVIDER_UNAVAILABLE", task_id, "fallback (%s unavailable)" % selected, provider_cfg)
+        return VerificationResult("UNAVAILABLE", "fallback (%s unavailable)" % selected, selected)
     try:
-        instance = _VERIFICATION_REGISTRY.get(selected)
-        if instance is None:
-            log_event("VERIFY_PROVIDER_UNAVAILABLE", task_id, "Provider unavailable", provider_cfg)
-            return True, "fallback (%s unavailable)" % selected
-        if not instance.can_verify(provider_cfg.get("config", {})):
-            log_event("VERIFY_PROVIDER_UNAVAILABLE", task_id, "Provider unavailable", provider_cfg)
-            return True, "fallback (%s unavailable)" % selected
-        outcome = instance.verify(task_id, evidence, provider_cfg.get("config", {}))
-        state = outcome.get("status", "unavailable")
-        item = outcome.get("provider", selected)
-        note = outcome.get("detail", state)
-        if state == "pass":
-            log_event("VERIFY_PROVIDER_PASS", task_id, note, provider_cfg)
-            return True, "%s pass" % item
-        if state == "fail":
-            log_event("VERIFY_PROVIDER_FAIL", task_id, note, provider_cfg)
-            return False, "%s" % item
-        log_event("VERIFY_PROVIDER_UNAVAILABLE", task_id, note, provider_cfg)
-        return True, "fallback (%s unavailable)" % selected
+        available = instance.can_verify(cfg_detail)
     except Exception as e:
-        log_event("VERIFY_PROVIDER_ERROR", task_id, "Provider error", {"error": str(e)})
-        return True, "fallback (%s unavailable)" % selected
+        log_event("VERIFY_PROVIDER_ERROR", task_id, "error (%s unavailable: %s)" % (selected, e), {"error": str(e)})
+        return VerificationResult("ERROR", "error (%s unavailable: %s)" % (selected, e), selected)
+    if not available:
+        log_event("VERIFY_PROVIDER_UNAVAILABLE", task_id, "fallback (%s unavailable)" % selected, provider_cfg)
+        return VerificationResult("UNAVAILABLE", "fallback (%s unavailable)" % selected, selected)
+    try:
+        outcome = instance.verify(task_id, evidence, cfg_detail)
+    except Exception as e:
+        log_event("VERIFY_PROVIDER_ERROR", task_id, "error (%s unavailable: %s)" % (selected, e), {"error": str(e)})
+        return VerificationResult("ERROR", "error (%s unavailable: %s)" % (selected, e), selected)
+    if not isinstance(outcome, dict) or "status" not in outcome:
+        log_event("VERIFY_PROVIDER_ERROR", task_id, "error (%s unavailable: malformed response)" % selected, provider_cfg)
+        return VerificationResult("ERROR", "error (%s unavailable: malformed response)" % selected, selected)
+    norm = _normalize_provider_status(outcome.get("status"))
+    if norm is None:
+        log_event("VERIFY_PROVIDER_ERROR", task_id, "error (%s unavailable: malformed status)" % selected, provider_cfg)
+        return VerificationResult("ERROR", "error (%s unavailable: malformed status)" % selected, selected)
+    item = str(outcome.get("provider", selected) or selected)
+    note = str(outcome.get("detail", outcome.get("status", norm)) or norm)
+    if norm == "PASS":
+        log_event("VERIFY_PROVIDER_PASS", task_id, note, provider_cfg)
+        return VerificationResult("PASS", "%s pass" % item, item)
+    if norm == "FAIL":
+        log_event("VERIFY_PROVIDER_FAIL", task_id, note, provider_cfg)
+        return VerificationResult("FAIL", "%s fail: %s" % (item, note), item)
+    if norm == "UNAVAILABLE":
+        log_event("VERIFY_PROVIDER_UNAVAILABLE", task_id, note, provider_cfg)
+        return VerificationResult("UNAVAILABLE", "fallback (%s unavailable: %s)" % (selected, note), item)
+    if norm == "DISABLED":
+        log_event("VERIFY_PROVIDER_SKIP", task_id, note, provider_cfg)
+        return VerificationResult("DISABLED", "skipped (disabled: %s)" % note, item)
+    log_event("VERIFY_PROVIDER_ERROR", task_id, note, provider_cfg)
+    return VerificationResult("ERROR", "error (%s unavailable: %s)" % (selected, note), item)
+
+
+def verify_with_provider(task_id, evidence=None):
+    """Backward-compatible wrapper around verify_status.
+
+    Policy default (Manager/Gate decides, verifier does not):
+    only status PASS counts as passed (True); every other status
+    (FAIL/UNAVAILABLE/DISABLED/ERROR) counts as not-passed (False).
+    Keeps the legacy (bool, message) signature.
+    """
+    result = verify_status(task_id, evidence)
+    if result.status == "PASS":
+        return True, result.message
+    return False, result.message
 
 def load_json(path, default=None):
     if not os.path.exists(path):
@@ -1253,6 +1331,87 @@ def transition_state(state, event_type, task_id, extra=None, lease=None):
     return state
 
 
+_TASK_STATUS_TRANSITIONS = {
+    "pending": ("ready", "cancelled"),
+    "ready": ("completed", "cancelled"),
+    "completed": (),
+    "cancelled": (),
+}
+
+
+def transition_task_status(task, target, context=None):
+    cur = str((task or {}).get("status", "") or "").lower()
+    tgt = str(target or "").lower()
+    allowed = _TASK_STATUS_TRANSITIONS.get(cur)
+    task_id = str((task or {}).get("id", "") or "UNKNOWN")
+    if allowed is None:
+        reason = "unknown current status %r" % (cur,)
+        log_event("TRANSITION_REJECTED", task_id, "task status transition rejected: %s -> %s (%s)" % (cur, tgt, reason), {"from": cur, "to": tgt, "reason": reason})
+        return (False, reason)
+    if tgt not in allowed:
+        if cur in ("completed", "cancelled"):
+            reason = "terminal status %r cannot transition to %r" % (cur, tgt)
+        else:
+            reason = "invalid task status transition %r -> %r" % (cur, tgt)
+        log_event("TRANSITION_REJECTED", task_id, "task status transition rejected: %s -> %s (%s)" % (cur, tgt, reason), {"from": cur, "to": tgt, "reason": reason})
+        return (False, reason)
+    if tgt == "completed":
+        verified = False
+        ctx = context or {}
+        if ctx.get("verified") or ctx.get("verify_passed") or ctx.get("verification_passed"):
+            verified = True
+        if not verified and task_id != "UNKNOWN":
+            try:
+                verified = bool(_has_verifying_success(task_id))
+            except Exception:
+                verified = False
+        if not verified:
+            reason = "completed requires verification gate (VERIFYING_SUCCESS)"
+            log_event("TRANSITION_REJECTED", task_id, "task status transition rejected: %s -> %s (%s)" % (cur, tgt, reason), {"from": cur, "to": tgt, "reason": reason})
+            return (False, reason)
+    task["status"] = tgt
+    return (True, "")
+
+
+_MANAGER_PHASE_TRANSITIONS = {
+    "building": ("verifying", "recovering", "blocked", "completed"),
+    "verifying": ("verifying", "reviewing", "recovering", "blocked", "completed"),
+    "reviewing": ("verifying", "blocked", "completed"),
+    "recovering": ("verifying", "recovering", "blocked", "completed"),
+    "completed": (),
+    "blocked": (),
+}
+
+
+def transition_manager_phase(state, target, context=None):
+    cur = str((state or {}).get("phase", "") or "").lower()
+    tgt = str(target or "").lower()
+    allowed = _MANAGER_PHASE_TRANSITIONS.get(cur)
+    task_id = str((state or {}).get("current_task_id", "") or "GLOBAL")
+    if context and isinstance(context, dict) and context.get("task_id"):
+        task_id = str(context.get("task_id"))
+    if allowed is None:
+        reason = "unknown current phase %r" % (cur,)
+        log_event("TRANSITION_REJECTED", task_id, "manager phase transition rejected: %s -> %s (%s)" % (cur, tgt, reason), {"from": cur, "to": tgt, "reason": reason})
+        return (False, reason)
+    if tgt not in allowed:
+        if cur in ("completed", "blocked"):
+            reason = "terminal phase %r cannot transition to %r" % (cur, tgt)
+        else:
+            reason = "invalid manager phase transition %r -> %r" % (cur, tgt)
+        log_event("TRANSITION_REJECTED", task_id, "manager phase transition rejected: %s -> %s (%s)" % (cur, tgt, reason), {"from": cur, "to": tgt, "reason": reason})
+        return (False, reason)
+    if tgt == "completed":
+        ctx = context or {}
+        if "verified" in ctx or "verify_passed" in ctx or "verification_passed" in ctx:
+            if not (ctx.get("verified") or ctx.get("verify_passed") or ctx.get("verification_passed")):
+                reason = "completed requires verification gate"
+                log_event("TRANSITION_REJECTED", task_id, "manager phase transition rejected: %s -> %s (%s)" % (cur, tgt, reason), {"from": cur, "to": tgt, "reason": reason})
+                return (False, reason)
+    state["phase"] = tgt
+    return (True, "")
+
+
 def validate_state_event_consistency(state, events_subset=None):
     """Validate state_version/event_sequence/updated_at vs recent events.
     Returns (is_consistent, reason).
@@ -1331,7 +1490,9 @@ def reconcile_state(state, lease=None):
         except Exception:
             continue
         if "BLOCK" in str(_ev.get("event", "")):
-            state["phase"] = "blocked"
+            _mp_ok1, _mp_reason1 = transition_manager_phase(state, "blocked")
+            if not _mp_ok1:  # TRANSITION-EXEMPT: preserve legacy forced write (->blocked)
+                state["phase"] = "blocked"
             state["last_applied_event_sequence"] = int(_idx) - 1
             _bump_state_version(state)
             save_json(STATE_FILE, state)
@@ -1342,7 +1503,9 @@ def reconcile_state(state, lease=None):
         log_event("STATE_RECONCILED", state.get("current_task_id", "GLOBAL"),
                   f"State inconsistency detected: {reason}; forcing RECOVERING",
                   {"state_version": state.get("state_version"), "event_sequence": state.get("event_sequence"), "reason": reason})
-        state["phase"] = "recovering"
+        _mp_ok2, _mp_reason2 = transition_manager_phase(state, "recovering")
+        if not _mp_ok2:  # TRANSITION-EXEMPT: preserve legacy forced write (->recovering)
+            state["phase"] = "recovering"
         state["reconciled"] = True
         state["reconciled_reason"] = reason
         _bump_state_version(state)
@@ -1358,7 +1521,9 @@ def reconcile_state(state, lease=None):
             if state.get("phase") == "building" and last_ev.get("event") == "TASK_DONE":
                 log_event("STATE_STALE_TASK_DONE", task_id, "State BUILDING but last event TASK_DONE — reconcile to completed",
                           {"phase": state.get("phase"), "last_event": last_ev.get("event")})
-                state["phase"] = "completed"
+                _mp_ok3, _mp_reason3 = transition_manager_phase(state, "completed")
+                if not _mp_ok3:  # TRANSITION-EXEMPT: preserve legacy forced write (building->completed)
+                    state["phase"] = "completed"
                 _bump_state_version(state)
                 save_json(STATE_FILE, state)
     return True
@@ -1828,7 +1993,9 @@ class ManagerOrchestrator:
         ctx_path = generate_resume_context(task_id, task_title, checkpoint_for_ctx)
 
         self.state["attempt"] = self.state.get("attempt", 1) + 1
-        self.state["phase"] = "recovering"
+        _mp_ok4, _mp_reason4 = transition_manager_phase(self.state, "recovering")
+        if not _mp_ok4:  # TRANSITION-EXEMPT: preserve legacy forced write (->recovering)
+            self.state["phase"] = "recovering"
         self.state["last_recovery_source"] = recovery_source
         self.state["reconstructed_from"] = sources
         self.state["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -1929,13 +2096,17 @@ Session attempt incremented to {self.state['attempt']}.
             if attempt >= max_sessions:
                 log_event("STARTUP_BUDGET_EXCEEDED", task_id, f"Attempt {attempt} >= max {max_sessions}, blocking",
                           {"attempt": attempt, "worker_attempt": self.state.get("worker_attempt"), "max": max_sessions})
-                self.state["phase"] = "blocked"
+                _mp_ok5, _mp_reason5 = transition_manager_phase(self.state, "blocked")
+                if not _mp_ok5:  # TRANSITION-EXEMPT: preserve legacy forced write (->blocked)
+                    self.state["phase"] = "blocked"
                 save_json(STATE_FILE, self.state)
                 return "BLOCKED"
             _s_allowed, _s_reason = self.check_budget("session")
             if not _s_allowed:
                 log_event("STARTUP_BUDGET_EXHAUSTED", task_id, "session budget exhausted — BLOCKED (%s)" % _s_reason)
-                self.state["phase"] = "blocked"
+                _mp_ok6, _mp_reason6 = transition_manager_phase(self.state, "blocked")
+                if not _mp_ok6:  # TRANSITION-EXEMPT: preserve legacy forced write (->blocked)
+                    self.state["phase"] = "blocked"
                 save_json(STATE_FILE, self.state)
                 return "BLOCKED"
         # 11. RECOVER / RESUME
@@ -1967,7 +2138,9 @@ Session attempt incremented to {self.state['attempt']}.
             if t.get("status") == "pending":
                 deps = t.get("dependencies", [])
                 if all(d in completed_ids for d in deps):
-                    t["status"] = "ready"
+                    ok_ts, _rsn = transition_task_status(t, "ready")
+                    if not ok_ts:  # TRANSITION-EXEMPT: preserve legacy ready promotion
+                        t["status"] = "ready"
                     updated = True
                     log_event("TASK_READY", t["id"], f"Task dependencies met. Status -> ready")
         if updated:
@@ -2074,6 +2247,7 @@ Session attempt incremented to {self.state['attempt']}.
             else:
                 risk_level = "LOW"
         if str(risk_level).upper() == "HIGH":
+            # TRANSITION-EXEMPT: manager-status not phase/task
             self.state["status"] = "approval_required"
             save_json(STATE_FILE, self.state)
             log_event("APPROVAL_REQUIRED", task_id, f"Task {task_id} has HIGH risk level. Requires user approval.")
@@ -2109,7 +2283,9 @@ Session attempt incremented to {self.state['attempt']}.
             log_event("VERIFYING_START", task_id, f"Entering VERIFYING from {prev_phase} (canonical gate)")
         else:
             log_event("VERIFYING_START", task_id, "Beginning evidence-based completion verification")
-        self.state["phase"] = "verifying"
+        _mp_ok7, _mp_reason7 = transition_manager_phase(self.state, "verifying")
+        if not _mp_ok7:  # TRANSITION-EXEMPT: preserve legacy forced write (->verifying)
+            self.state["phase"] = "verifying"
         self.state["updated_at"] = datetime.now(timezone.utc).isoformat()
         save_json(STATE_FILE, self.state)
         ev = evidence if isinstance(evidence, dict) else {}
@@ -2120,7 +2296,9 @@ Session attempt incremented to {self.state['attempt']}.
             return _VerifyResult((True, checks))
         else:
             failed = [k for k, v in checks.items() if not v]
-            self.state["phase"] = "verifying"
+            _mp_ok8, _mp_reason8 = transition_manager_phase(self.state, "verifying")
+            if not _mp_ok8:  # TRANSITION-EXEMPT: preserve legacy forced write (verifying->verifying)
+                self.state["phase"] = "verifying"
             save_json(STATE_FILE, self.state)
             log_event("VERIFYING_FAILED", task_id, f"Evidence check failed: {len(failed)}/9 failed ({','.join(failed)})")
             return _VerifyResult((False, checks))
@@ -2147,15 +2325,20 @@ Session attempt incremented to {self.state['attempt']}.
         # Update Queue
         for t in self.queue.get("tasks", []):
             if t.get("id") == task_id:
-                t["status"] = "completed"
+                ok_ts, _rsn = transition_task_status(t, "completed", {"verified": True, "task_id": task_id})
+                if not ok_ts:  # TRANSITION-EXEMPT: complete_task forces DONE after gate passed
+                    t["status"] = "completed"
                 t["updated_at"] = datetime.now(timezone.utc).isoformat()
                 break
         save_json(QUEUE_FILE, self.queue)
 
         # Update State
         self.state["current_task_id"] = task_id
+        # TRANSITION-EXEMPT: manager-status not phase/task
         self.state["status"] = "running"
-        self.state["phase"] = "completed"
+        _mp_ok9, _mp_reason9 = transition_manager_phase(self.state, "completed", {"verified": True, "task_id": task_id})
+        if not _mp_ok9:  # TRANSITION-EXEMPT: preserve legacy forced write (verifying->completed)
+            self.state["phase"] = "completed"
         self.state["last_result"] = f"{task_id} completed successfully with evidence."
         self.state["updated_at"] = datetime.now(timezone.utc).isoformat()
         save_json(STATE_FILE, self.state)

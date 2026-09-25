@@ -1325,6 +1325,52 @@ class IsolatedManagerTest(unittest.TestCase):
                 mgr_mod.CONFIG_FILE = orig_cfg
                 mgr_mod._VERIFICATION_REGISTRY.pop(name, None)
 
+    def test_FIX004_can_verify_raise_is_error(self):
+        orig_cfg = mgr_mod.CONFIG_FILE
+        class _BoomCan(mgr_mod.VerificationProvider):
+            name = "tmp-fix004-canboom"
+            def can_verify(self, config=None):
+                raise RuntimeError("can-boom")
+            def verify(self, task_id, evidence=None, config=None):
+                return {"status": "pass", "provider": self.name, "detail": "should-not-run"}
+        mgr_mod.register_verification_provider(_BoomCan())
+        cfg_path = os.path.join(self.tmpdir, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"verification": {"enabled": True, "provider": "tmp-fix004-canboom"}}))
+        mgr_mod.CONFIG_FILE = cfg_path
+        try:
+            res = mgr_mod.verify_status("TEST-FIX004-CANBOOM", {})
+            self.assertEqual(res.status, "ERROR")
+            self.assertFalse(res.passed)
+            ok, _ = mgr_mod.verify_with_provider("TEST-FIX004-CANBOOM", {})
+            self.assertFalse(ok)
+        finally:
+            mgr_mod.CONFIG_FILE = orig_cfg
+            mgr_mod._VERIFICATION_REGISTRY.pop("tmp-fix004-canboom", None)
+
+    def test_FIX004_unknown_status_string_is_error(self):
+        orig_cfg = mgr_mod.CONFIG_FILE
+        class _Weird(mgr_mod.VerificationProvider):
+            name = "tmp-fix004-weird"
+            def can_verify(self, config=None):
+                return True
+            def verify(self, task_id, evidence=None, config=None):
+                return {"status": "weird-xyz", "provider": self.name, "detail": "weird"}
+        mgr_mod.register_verification_provider(_Weird())
+        cfg_path = os.path.join(self.tmpdir, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"verification": {"enabled": True, "provider": "tmp-fix004-weird"}}))
+        mgr_mod.CONFIG_FILE = cfg_path
+        try:
+            res = mgr_mod.verify_status("TEST-FIX004-WEIRD", {})
+            self.assertEqual(res.status, "ERROR")
+            self.assertFalse(res.passed)
+            ok, _ = mgr_mod.verify_with_provider("TEST-FIX004-WEIRD", {})
+            self.assertFalse(ok)
+        finally:
+            mgr_mod.CONFIG_FILE = orig_cfg
+            mgr_mod._VERIFICATION_REGISTRY.pop("tmp-fix004-weird", None)
+
     def test_FIXV227_p0_green_proceeds(self):
         m = mgr_mod.ManagerOrchestrator(owner="test-V227-green")
         m.state["p0_last_result"] = {"passed": True, "at": datetime.now(timezone.utc).isoformat()}

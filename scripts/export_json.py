@@ -5,6 +5,7 @@ import glob
 import argparse
 import sqlite3
 from datetime import datetime, timezone
+from urllib.request import pathname2url
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -142,7 +143,7 @@ def read_snapshot_via_db(db_path, events_path, queue_path):
             line_count = 0
         except Exception:
             return (None, None)
-        conn = sqlite3.connect("file:%s?mode=ro" % os.path.abspath(db_path), uri=True, timeout=5)
+        conn = sqlite3.connect("file:%s?mode=ro" % pathname2url(os.path.abspath(db_path)), uri=True, timeout=5)
         try:
             try:
                 cur = conn.execute("SELECT key, value FROM sync_meta WHERE key IN ('last_sync_at', 'last_seq')")
@@ -186,6 +187,15 @@ def read_snapshot_via_db(db_path, events_path, queue_path):
                 if isinstance(obj, dict):
                     tasks.append(obj)
             queue = {"tasks": tasks}
+            try:
+                with open(queue_path, "r", encoding="utf-8-sig") as f:
+                    raw = json.load(f)
+                if isinstance(raw, dict):
+                    for k, v in raw.items():
+                        if k != "tasks" and k not in queue:
+                            queue[k] = v
+            except Exception:
+                pass
             return (events, queue)
         finally:
             try:
@@ -548,7 +558,14 @@ def main(argv=None):
     parser.add_argument("--events", default=EVENTS_FILE, help="Input events.jsonl path")
     parser.add_argument("--db", default=DB_PATH, help="SQLite read-model path")
     parser.add_argument("--no-db", action="store_true", help="Force reading from JSON files")
+    parser.add_argument("--auto-sync", action="store_true", help="Sync SQLite read-model before reading (opt-in)")
     args = parser.parse_args(argv)
+    if args.auto_sync:
+        try:
+            import sqlite_sync as _sync
+            _sync.main(["--db", args.db])
+        except Exception as e:
+            print("warning: --auto-sync failed: %s" % e, file=sys.stderr)
     export_data(args.out, metrics_path=args.metrics, events_path=args.events,
                 db_path=args.db, use_db=not args.no_db)
     return 0

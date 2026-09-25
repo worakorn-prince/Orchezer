@@ -36,6 +36,7 @@ def default_projects(base=None):
 
 from export_json import (  # noqa: E402
     read_jsonl, load_json, read_reviews, read_history, build_extra, dump_json,
+    read_snapshot_via_db,
 )
 from tools_inventory import build_tools_section  # noqa: E402
 from graph import build_graph  # noqa: E402
@@ -68,7 +69,7 @@ def _safe_contract(events, toolcalls, checkpoint, config):
                 "recommendations": []}
 
 
-def collect_project(root):
+def collect_project(root, use_db=True):
     """อ่าน 1 โปรเจกต์ → dict (ทนไฟล์หาย/เสีย: ok=False แทนการพัง)."""
     name = os.path.basename(os.path.normpath(root))
     mgr = os.path.join(root, ".agent", "manager")
@@ -76,9 +77,19 @@ def collect_project(root):
     if not metrics:
         return {"name": name, "root": root, "ok": False,
                 "error": "metrics.json not found — run metrics.py --rebuild in that project first"}
-    events = read_jsonl(os.path.join(mgr, "events.jsonl"))
+    events_path = os.path.join(mgr, "events.jsonl")
+    queue_path = os.path.join(mgr, "queue.json")
+    events = read_jsonl(events_path)
     toolcalls = read_jsonl(os.path.join(mgr, "tool-calls.jsonl"))
-    queue = load_json(os.path.join(mgr, "queue.json"), default={}) or {}
+    queue = load_json(queue_path, default={}) or {}
+    if use_db:
+        try:
+            db_events, db_queue = read_snapshot_via_db(
+                os.path.join(mgr, "manager_index.db"), events_path, queue_path)
+            if db_events is not None and db_queue is not None:
+                events, queue = db_events, db_queue
+        except Exception:
+            pass
     reviews = read_reviews(os.path.join(mgr, "reviews"))
     history = read_history(os.path.join(mgr, "history"))
     checkpoint = load_json(os.path.join(root, ".agent", "building", "checkpoint.json"), default={}) or {}
@@ -109,8 +120,8 @@ def collect_project(root):
             "contract": _safe_contract(events, toolcalls, checkpoint, config)}
 
 
-def build_payload(projects):
-    collected = [collect_project(p) for p in projects]
+def build_payload(projects, use_db=True):
+    collected = [collect_project(p, use_db=use_db) for p in projects]
     ok = [c for c in collected if c.get("ok")]
 
     def s(key):
@@ -325,10 +336,12 @@ def main(argv=None):
     parser.add_argument("--projects", default=None,
                         help="Comma-separated project roots (default: auto-scan siblings with metrics.json)")
     parser.add_argument("--out", default=OUT_DEFAULT, help="Output JSON path")
+    parser.add_argument("--no-db", action="store_true",
+                        help="Force reading from JSON files (default: auto-try manager_index.db)")
     args = parser.parse_args(argv)
     projects = ([p.strip() for p in args.projects.split(",") if p.strip()]
                 if args.projects else default_projects())
-    payload = build_payload(projects)
+    payload = build_payload(projects, use_db=not args.no_db)
     dump_json(payload, args.out)
     c = payload["combined"]
     print(f"Aggregated: {c['projects']} projects, {c['total_tasks']} tasks, "

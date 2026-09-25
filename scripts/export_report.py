@@ -69,7 +69,7 @@ def build_markdown(payload, mode="single"):
 
     md = f"# {title}\n\n"
     md += f"> Generated: {generated} | Project: {project_name} | Mode: {mode}\n\n"
-    md += "> Orchezer — Observability Dashboard (file-based, stdlib only) — 19 sections derived from `dashboard/data.json`\n\n"
+    md += "> Orchezer — Agent Orchestrator & Observability Dashboard (file-based, stdlib only) — 19 sections derived from `dashboard/data.json`\n\n"
 
     # 1 KPIs
     md += _h2("1. KPIs")

@@ -1,4 +1,4 @@
-# Orchezer — Observability Dashboard
+# Orchezer — Agent Orchestrator & Observability Dashboard
 
 File-based observability dashboards (pure Python stdlib — no `pip install`)
 for project task / tool-call / session history, across projects.

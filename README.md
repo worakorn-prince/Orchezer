@@ -57,6 +57,34 @@ Run the test suite (171 tests: `test_logging` 37 + `test_hardening` 77 + `test_u
 pytest scripts/ -q   # or: python -m unittest discover -s scripts -p "test_*.py" (stdlib, no installs)
 ```
 
+## Optional SQLite read-model (derived cache)
+
+JSONL files stay the only source of truth. `scripts/sqlite_sync.py` builds
+a per-project derived cache (stdlib `sqlite3` only, no server):
+
+```powershell
+python scripts/sqlite_sync.py                  # incremental → .agent/manager/manager_index.db
+python scripts/sqlite_sync.py --rebuild        # full rebuild
+python scripts/sqlite_sync.py --dry-run        # preview only, DB untouched
+```
+
+`metrics.py` / `export_json.py` read the DB automatically when fresh, else
+fall back to JSONL silently. Freshness = `last_sync_at` age < 1h, `last_seq`
+covers the current JSONL line count, and source mtime + byte size match:
+
+```powershell
+python scripts/metrics.py --rebuild             # default: auto-try --db
+python scripts/metrics.py --rebuild --no-db     # force JSONL
+python scripts/metrics.py --rebuild --auto-sync # opt-in sync before read (warn-and-continue)
+python scripts/export_json.py --auto-sync       # same flags: --db / --no-db / --auto-sync
+python scripts/aggregate.py                     # federated: per-project DB auto-try
+python scripts/aggregate.py --no-db             # federated from JSONL only
+```
+
+`bootstrap.py --sync` runs the same incremental sync after install
+(warn-and-continue on failure). The DB is gitignored runtime state —
+delete it any time and rebuild with one command.
+
 ## Log schema (the only contract to follow)
 
 **`./.agent/manager/tool-calls.jsonl`** — one JSON object per line:
@@ -95,7 +123,8 @@ scripts/
   graph.py           # Execution Graph Task→Attempt→Session (no schema change)
   risk.py            # deterministic session-risk signals
   observability.py   # manager contract → .agent/manager/observability.json (schema v1)
-  failure.py         # failure taxonomy + recovery analytics
+   failure.py         # failure taxonomy + recovery analytics
+   sqlite_sync.py     # JSONL → manager_index.db derived cache (optional, stdlib sqlite3)
   bench.py           # synthetic benchmarks (see docs/BENCHMARKS.md)
    bootstrap.py       # init .agent/ skeleton (+ --demo sample data)
    test_logging.py    # 37 tests (schema + metrics + views)

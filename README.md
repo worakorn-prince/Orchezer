@@ -1,8 +1,11 @@
 # Orchezer — Agent Orchestrator & Observability Dashboard
 
-File-based observability dashboards (pure Python stdlib — no `pip install`)
-for project task / tool-call / session history, across projects.
-Works with any harness or framework — just write logs in the schema below.
+File-based **Manager Orchestrator** + observability dashboards (pure Python
+stdlib — no `pip install`). The orchestrator runs the task loop — queue →
+dispatch worker sessions → review gates → evidence-based verify → complete,
+with recovery and checkpoints — and records everything as JSONL. The dashboards
+read those logs into views, per project and across projects.
+Works with any harness or framework.
 
 ## Get started in 2 steps (after cloning)
 
@@ -29,7 +32,8 @@ run_dashboard.bat
 ```
 (On macOS/Linux use `sh run_dashboard.sh` for the second step.)
 
-- `--demo` seeds sample data first → the browser opens with charts populated
+- `--demo` seeds sample data first (queue + events) → the orchestrator has
+  something to run and the browser opens with charts populated
 - If real data already exists (`./.agent/`), drop `--demo` (the script never touches existing files)
 - The browser opens the **combined view** (`dashboard/all.html`); the
   **single-project view** is `dashboard/index.html`
@@ -52,7 +56,24 @@ python scripts\bootstrap.py --config --set MEMORY_MCP_DIR=D:/tools/memory-mcp --
 
 Requires Python 3.10+, stdlib only (no `pip install`).
 
-## Manual run (without the one-click script)
+## Manager Orchestrator (core)
+
+The orchestrator is the main part of Orchezer. It owns the task loop:
+
+```text
+queue.json → dispatch worker session → review gate → verify evidence →
+complete (or recovery → resume and retry)
+```
+
+State lives in `./.agent/manager/` (`queue.json`, `state.json`,
+`events.jsonl`, `operations.jsonl`, `baselines/`, `checkpoint.json`) —
+JSONL files are the only source of truth; everything else is derived.
+Key guarantees: explicit verification statuses (only PASS passes),
+central transition boundary with terminal protection, attempt-scoped
+immutable baselines, idempotent recovery (`task:operation:attempt`).
+Full spec: `design.md` (local) and `design.github.md` (published).
+
+## Viewer pipeline (manual run)
 
 ```powershell
 python scripts/metrics.py --rebuild   # compute from .agent/manager/*.jsonl
@@ -61,7 +82,7 @@ python scripts/aggregate.py           # → dashboard/all-projects.json (combine
 python -m http.server --bind 127.0.0.1 --directory dashboard   # open dashboard/*.html over http (do not open file:// directly, fetch gets blocked)
 ```
 
-Run the test suite (283 tests: `test_logging` 37 + `test_hardening` 176 + `test_upgrade` 10 + `test_lean_merge` 44 + `test_cli` 6 + `test_sync` 7 + `test_gates` 3):
+Run the test suite (295 tests: `test_logging` 37 + `test_hardening` 184 + `test_upgrade` 10 + `test_lean_merge` 44 + `test_cli` 6 + `test_sync` 7 + `test_gates` 3 + `test_e2e` 4):
 
 ```powershell
 pytest scripts/ -q   # or: python -m unittest discover -s scripts -p "test_*.py" (stdlib, no installs)
@@ -125,7 +146,7 @@ same 3 commands and the dashboards light up.
 
 ```text
 scripts/
-  manager.py         # optional logging helper (log_tool_call / log_dispatch / wrap_task)
+   manager.py         # orchestration core (queue/dispatch/review/recovery/verify) + logging helper
   metrics.py         # 6 metrics + efficiency + daily history snapshots
   export_json.py     # metrics+events → dashboard/data.json (single view)
   aggregate.py       # cross-project merge → dashboard/all-projects.json
@@ -138,11 +159,13 @@ scripts/
   bench.py           # synthetic benchmarks (see docs/BENCHMARKS.md)
    bootstrap.py       # init .agent/ skeleton (+ --demo sample data)
    test_logging.py    # 37 tests (schema + metrics + views)
-   test_hardening.py  # 176 collected (77 base + FIX002/003/004 suites incl. inherited re-runs)
+   test_hardening.py  # 184 collected (77 base + FIX002/003/004 + V212/baseline suites incl. inherited re-runs)
    test_upgrade.py    # 10 tests (watchdog + recovery + queue)
-   test_lean_merge.py # 44 tests (14 lean modules merge) + 3 (283 total: 37+176+10+44+6+7+3)
+   test_lean_merge.py # 44 tests (14 lean modules merge) + 3 + 4 (295 total: 37+184+10+44+6+7+3+4)
    test_cli.py        # 6 tests (orchezer CLI dispatcher)
    test_sync.py       # 7 tests (JSONL integrity matrix)
+   test_gates.py      # 3 tests (dispatch/complete gates)
+   test_e2e.py        # 4 tests (P0 end-to-end: happy/limit/verify-fail/unavailable)
    # 14 lean modules (pure, no I/O side effects):
    lean_flow.py / task_levels.py / task_contract.py / dag_waves.py
    batch_seq.py / worker_choice.py / ctx_cache.py / ctx_compiler.py

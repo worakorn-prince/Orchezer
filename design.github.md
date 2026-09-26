@@ -67,7 +67,7 @@ source of truth. Delete any generated file and rebuild it with one command.
 
 | Script | Reads | Writes |
 |---|---|---|
-| `manager.py` | config / state / queue (optional logging API + verification provider interface) | `tool-calls.jsonl` + `TOOL_CALL` events, `operations.jsonl`, `manager.lock` |
+| `manager.py` | config / state / queue (optional logging API + verification provider interface) | `tool-calls.jsonl` + `TOOL_CALL` events, `operations.jsonl`, `manager.lock`; explicit verify statuses (only PASS passes), central transition boundary (allow-list + EXEMPT fallbacks), attempt-scoped immutable baselines |
 | `metrics.py` | events + tool-calls + queue (or `manager_index.db` when fresh; `--db` / `--no-db` / `--auto-sync`) | `metrics.json`, `history/YYYY-MM-DD.json` (6 metrics + efficiency) |
 | `graph.py` | events + tool-calls | execution trees Task→Attempt→Session (in-memory + CLI) |
 | `risk.py` | tool-calls + checkpoint | session risk levels (observation vs recommendation) |
@@ -102,6 +102,8 @@ Both are dependency-free static pages (Chart.js via CDN with table fallback when
 - Additive schema evolution: new fields are optional, readers tolerate unknowns.
 - Never log secrets or full prompts — store hashes, not content.
 - Runtime files (`./.agent/`, `dashboard/*.json`) are gitignored by design.
+- Hermetic tests: pytest `conftest.py` redirects baselines/decisions/context to tmp
+  per test (295 tests incl. P0 end-to-end scenarios); no test run pollutes `./.agent/`.
 
 ## Note: v0.3.0-hardened
 

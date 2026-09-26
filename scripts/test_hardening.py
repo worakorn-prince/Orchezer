@@ -1496,7 +1496,7 @@ class TestFIXV222CoreObservabilityIsolation(unittest.TestCase):
         import manager as _m
         tmp = tempfile.mkdtemp(prefix="test_V222_")
         self.addCleanup(shutil.rmtree, tmp, True)
-        orig = {k: getattr(_m, k) for k in ("QUEUE_FILE", "STATE_FILE", "CHECKPOINT_FILE", "OPERATIONS_FILE", "EVENTS_FILE", "LOCK_FILE") if hasattr(_m, k)}
+        orig = {k: getattr(_m, k) for k in ("QUEUE_FILE", "STATE_FILE", "CHECKPOINT_FILE", "OPERATIONS_FILE", "EVENTS_FILE", "LOCK_FILE", "BASELINE_DIR", "DECISIONS_DIR") if hasattr(_m, k)}
         tq = os.path.join(tmp, "queue.json")
         ts = os.path.join(tmp, "state.json")
         tc = os.path.join(tmp, "checkpoint.json")
@@ -1509,6 +1509,8 @@ class TestFIXV222CoreObservabilityIsolation(unittest.TestCase):
         _m.OPERATIONS_FILE = to
         _m.EVENTS_FILE = te
         _m.LOCK_FILE = tl
+        _m.BASELINE_DIR = os.path.join(tmp, "baselines")
+        _m.DECISIONS_DIR = os.path.join(tmp, "decisions")
         save_json(ts, {"schema_version": 2, "state_version": 1, "event_sequence": 1, "project": "test", "status": "running", "current_task_id": "TEST-V222", "phase": "building", "worker_attempt": 1, "recovery_attempt": 0, "task_retry": 0, "review_cycle": 0, "updated_at": datetime.now(timezone.utc).isoformat()})
         save_json(tq, {"tasks": []})
         blocked = ("metrics", "observability", "export_json", "export_report", "graph", "aggregate", "bench", "failure")

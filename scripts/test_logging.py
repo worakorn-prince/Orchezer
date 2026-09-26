@@ -46,6 +46,8 @@ class TestLoggingIsolated(unittest.TestCase):
             "manager_dir": manager_mod.MANAGER_DIR,
             "toolcalls": manager_mod.TOOLCALLS_FILE,
             "events": manager_mod.EVENTS_FILE,
+            "baselines": manager_mod.BASELINE_DIR,
+            "decisions": manager_mod.DECISIONS_DIR,
             "m_metrics_dir": metrics_mod.MANAGER_DIR,
             "m_metrics_events": metrics_mod.EVENTS_FILE,
             "m_metrics_calls": metrics_mod.TOOLCALLS_FILE,
@@ -55,6 +57,8 @@ class TestLoggingIsolated(unittest.TestCase):
         manager_mod.MANAGER_DIR = self.tmp.name
         manager_mod.TOOLCALLS_FILE = self.toolcalls
         manager_mod.EVENTS_FILE = self.events
+        manager_mod.BASELINE_DIR = os.path.join(self.tmp.name, "baselines")
+        manager_mod.DECISIONS_DIR = os.path.join(self.tmp.name, "decisions")
         metrics_mod.MANAGER_DIR = self.tmp.name
         metrics_mod.EVENTS_FILE = self.events
         metrics_mod.TOOLCALLS_FILE = self.toolcalls
@@ -65,6 +69,8 @@ class TestLoggingIsolated(unittest.TestCase):
         manager_mod.MANAGER_DIR = self._orig["manager_dir"]
         manager_mod.TOOLCALLS_FILE = self._orig["toolcalls"]
         manager_mod.EVENTS_FILE = self._orig["events"]
+        manager_mod.BASELINE_DIR = self._orig["baselines"]
+        manager_mod.DECISIONS_DIR = self._orig["decisions"]
         metrics_mod.MANAGER_DIR = self._orig["m_metrics_dir"]
         metrics_mod.EVENTS_FILE = self._orig["m_metrics_events"]
         metrics_mod.TOOLCALLS_FILE = self._orig["m_metrics_calls"]

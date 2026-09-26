@@ -54,7 +54,10 @@ class IsolatedGateTest(unittest.TestCase):
         mgr_mod.OPERATIONS_FILE = self.tmp_operations
         mgr_mod.EVENTS_FILE = self.tmp_events
         mgr_mod.LOCK_FILE = self.tmp_lock
-        import scripts.manager as _m
+        self._orig["baselines"] = mgr_mod.BASELINE_DIR
+        self._orig["decisions"] = mgr_mod.DECISIONS_DIR
+        mgr_mod.BASELINE_DIR = os.path.join(self.tmpdir, "baselines")
+        mgr_mod.DECISIONS_DIR = os.path.join(self.tmpdir, "decisions")
         save_json(self.tmp_state, {
             "schema_version": 2,
             "state_version": 1,
@@ -89,6 +92,10 @@ class IsolatedGateTest(unittest.TestCase):
                     mgr_mod.EVENTS_FILE = orig
                 elif key == "lock":
                     mgr_mod.LOCK_FILE = orig
+                elif key == "baselines":
+                    mgr_mod.BASELINE_DIR = orig
+                elif key == "decisions":
+                    mgr_mod.DECISIONS_DIR = orig
             except Exception:
                 pass
         for key, (orig, bak) in self._backups.items():

@@ -11,10 +11,7 @@ from manager import (
 
 class TestManagerUpgrade(unittest.TestCase):
     def setUp(self):
-        os.makedirs(".agent/manager", exist_ok=True)
-        os.makedirs(".agent/building", exist_ok=True)
-        os.makedirs(DECISIONS_DIR, exist_ok=True)
-        os.makedirs(CONTEXT_DIR, exist_ok=True)
+        global QUEUE_FILE, STATE_FILE, CHECKPOINT_FILE, DECISIONS_DIR, CONTEXT_DIR
         # FIX-01: isolate destructive tests — backup real queue/state/checkpoint
         import tempfile, shutil
         self._tmpdir = tempfile.mkdtemp(prefix="test_upgrade_")
@@ -40,11 +37,27 @@ class TestManagerUpgrade(unittest.TestCase):
         self._orig_lock = _mgr.LOCK_FILE
         self._tmp_lock = os.path.join(self._tmpdir, "manager.lock")
         _mgr.LOCK_FILE = self._tmp_lock
-        # also patch globals in this module
-        global QUEUE_FILE, STATE_FILE, CHECKPOINT_FILE
+        # FIX-008: isolate event/log/dir paths too — never pollute real .agent
+        self._orig_extra = {}
+        _names = {"EVENTS_FILE": "events.jsonl",
+                  "TOOLCALLS_FILE": "toolcalls.jsonl",
+                  "OPERATIONS_FILE": "operations.jsonl",
+                  "BASELINE_DIR": "baselines",
+                  "DECISIONS_DIR": "decisions",
+                  "CONTEXT_DIR": "context"}
+        for _k, _sub in _names.items():
+            self._orig_extra[_k] = getattr(_mgr, _k)
+            _p = os.path.join(self._tmpdir, _sub)
+            setattr(_mgr, _k, _p)
+        os.makedirs(_mgr.DECISIONS_DIR, exist_ok=True)
+        os.makedirs(_mgr.CONTEXT_DIR, exist_ok=True)
+        os.makedirs(_mgr.BASELINE_DIR, exist_ok=True)
+        # also patch globals in this module (global declared at setUp top)
         QUEUE_FILE = self._tmp_queue
         STATE_FILE = self._tmp_state
         CHECKPOINT_FILE = self._tmp_checkpoint
+        DECISIONS_DIR = _mgr.DECISIONS_DIR
+        CONTEXT_DIR = _mgr.CONTEXT_DIR
         # init tmp files with backups or defaults
         for key, path in [("queue", self._orig_queue), ("state", self._orig_state), ("checkpoint", self._orig_checkpoint)]:
             if key in self._backups:
@@ -62,10 +75,17 @@ class TestManagerUpgrade(unittest.TestCase):
         _mgr.STATE_FILE = self._orig_state
         _mgr.CHECKPOINT_FILE = self._orig_checkpoint
         _mgr.LOCK_FILE = self._orig_lock
-        global QUEUE_FILE, STATE_FILE, CHECKPOINT_FILE
+        for _k, _v in self._orig_extra.items():
+            try:
+                setattr(_mgr, _k, _v)
+            except Exception:
+                pass
+        global QUEUE_FILE, STATE_FILE, CHECKPOINT_FILE, DECISIONS_DIR, CONTEXT_DIR
         QUEUE_FILE = self._orig_queue
         STATE_FILE = self._orig_state
         CHECKPOINT_FILE = self._orig_checkpoint
+        DECISIONS_DIR = self._orig_extra["DECISIONS_DIR"]
+        CONTEXT_DIR = self._orig_extra["CONTEXT_DIR"]
         # restore backups if needed (queue already restored by not overwriting real file, but ensure)
         import shutil
         for key, (orig, bak) in self._backups.items():
